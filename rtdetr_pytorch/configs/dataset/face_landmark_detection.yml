@@ -1,0 +1,38 @@
+task: detection
+
+num_classes: 1  # Face only
+num_landmarks: 5  # 5-point landmarks
+
+train_dataloader: 
+  type: DataLoader
+  dataset: 
+    type: FaceLandmarkDataset
+    img_folder: ./dataset/faces/train/images/
+    ann_file: ./dataset/faces/train/annotations.json
+    num_landmarks: 5
+    return_visibility: False
+    transforms:
+      type: ComposeFaceLandmark
+      ops: ~
+  shuffle: True
+  batch_size: 16
+  num_workers: 4
+  drop_last: True 
+  collate_fn: default_collate_fn
+
+val_dataloader:
+  type: DataLoader
+  dataset: 
+    type: FaceLandmarkDataset
+    img_folder: ./dataset/faces/val/images/
+    ann_file: ./dataset/faces/val/annotations.json
+    num_landmarks: 5
+    return_visibility: False
+    transforms:
+      type: ComposeFaceLandmark
+      ops: ~
+  shuffle: False
+  batch_size: 8
+  num_workers: 4
+  drop_last: False
+  collate_fn: default_collate_fn

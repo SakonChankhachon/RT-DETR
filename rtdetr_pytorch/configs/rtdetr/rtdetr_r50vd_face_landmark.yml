@@ -1,0 +1,17 @@
+__include__: [
+  '../dataset/face_landmark_detection.yml',
+  '../runtime.yml',
+  './include/dataloader_face.yml',
+  './include/optimizer.yml',
+  './include/rtdetr_face_landmark.yml',
+]
+
+output_dir: ./output/rtdetr_r50vd_face_landmark
+
+# Override some settings for face detection
+epoches: 100
+checkpoint_step: 5
+
+# Specific settings for face detection
+num_classes: 1  # Only face class
+num_landmarks: 5  # 5-point landmarks

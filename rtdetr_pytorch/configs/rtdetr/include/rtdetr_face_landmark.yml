@@ -1,0 +1,76 @@
+task: detection
+
+model: RTDETR
+criterion: FaceLandmarkCriterion  # ✅ เปลี่ยนเป็น Face criterion
+postprocessor: RTDETRPostProcessor
+
+RTDETR: 
+  backbone: PResNet
+  encoder: HybridEncoder
+  decoder: RTDETRTransformerFaceLandmark
+  multi_scale: [480, 512, 544, 576, 608, 640, 640, 640, 672, 704, 736, 768, 800]
+
+PResNet:
+  depth: 50
+  variant: d
+  freeze_at: 0
+  return_idx: [1, 2, 3]
+  num_stages: 4
+  freeze_norm: True
+  pretrained: True 
+
+HybridEncoder:
+  in_channels: [512, 1024, 2048]
+  feat_strides: [8, 16, 32]
+  hidden_dim: 256
+  use_encoder_idx: [2]
+  num_encoder_layers: 1
+  nhead: 8
+  dim_feedforward: 1024
+  dropout: 0.
+  enc_act: 'gelu'
+  pe_temperature: 10000
+  expansion: 1.0
+  depth_mult: 1
+  act: 'silu'
+  eval_spatial_size: [640, 640]
+
+RTDETRTransformerFaceLandmark:
+  feat_channels: [256, 256, 256]
+  feat_strides: [8, 16, 32]
+  hidden_dim: 256
+  num_levels: 3
+  num_queries: 300
+  num_decoder_layers: 6
+  num_denoising: 100
+  eval_idx: -1
+  eval_spatial_size: [640, 640]
+  num_classes: 1
+  num_landmarks: 5
+
+use_focal_loss: True
+num_landmarks: 5  # ✅ Global config
+
+RTDETRPostProcessor:
+  num_top_queries: 300
+  num_classes: 1
+
+FaceLandmarkCriterion:  # ✅ เพิ่ม config
+  num_classes: 1
+  num_landmarks: 5
+  landmark_loss_type: 'l1'
+  weight_dict: {
+    loss_vfl: 1, 
+    loss_bbox: 5, 
+    loss_giou: 2,
+    loss_landmarks: 5  # ✅ Landmark loss weight
+  }
+  losses: ['vfl', 'boxes', 'landmarks']  # ✅ เพิ่ม landmarks
+  alpha: 0.75
+  gamma: 2.0
+  
+  matcher:
+    type: HungarianMatcher
+    weight_dict: {cost_class: 2, cost_bbox: 5, cost_giou: 2}
+    alpha: 0.25
+    gamma: 2.0
