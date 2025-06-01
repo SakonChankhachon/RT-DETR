@@ -300,6 +300,15 @@ def main(args):
     print(f"Total epochs: {cfg.epoches}")
     print(f"Number of training phases: {len(trainer.training_phases)}")
     
+
+    # tools/train_polar_landmarks.py ประมาณบรรทัด 280 ก่อน solver.setup()
+    # debug
+    print("DEBUG yaml_cfg type =", type(cfg.yaml_cfg))
+    print("DEBUG yaml_cfg value =", cfg.yaml_cfg)   # พิมพ์ออกทั้งก้อนก่อน
+
+
+
+
     # Setup solver for training
     solver.setup()
     solver.optimizer = cfg.optimizer

@@ -284,6 +284,7 @@ class RTDETRTransformer(nn.Module):
     def __init__(self,
                  num_classes=80,
                  hidden_dim=256,
+                 in_channels=[512, 1024, 2048],   # ← ชื่อ “in_channels”
                  num_queries=300,
                  position_embed_type='sine',
                  feat_channels=[512, 1024, 2048],
@@ -311,6 +312,21 @@ class RTDETRTransformer(nn.Module):
         assert len(feat_strides) == len(feat_channels)
         for _ in range(num_levels - len(feat_strides)):
             feat_strides.append(feat_strides[-1] * 2)
+
+        self.input_proj = nn.ModuleList([
+            nn.Sequential(
+                nn.Conv2d(in_ch, hidden_dim, 1),
+                nn.GroupNorm(32, hidden_dim)
+            )
+            for in_ch in in_channels
+        ])
+
+        print("DEBUG Decoder in_channels =", in_channels)
+        for j, proj in enumerate(self.input_proj):
+            w = proj[0].weight
+            print(f"  DEBUG proj[{j}] weight.shape = {tuple(w.shape)}")
+
+
 
         self.hidden_dim = hidden_dim
         self.nhead = nhead
@@ -410,33 +426,62 @@ class RTDETRTransformer(nn.Module):
             in_channels = self.hidden_dim
 
     def _get_encoder_input(self, feats):
-        # get projection features
-        proj_feats = [self.input_proj[i](feat) for i, feat in enumerate(feats)]
+        # debug: how many levels we received
+        print(f"↪️ _get_encoder_input called with {len(feats)} levels of features")
+
+        proj_feats = []
+        for i, feat in enumerate(feats):
+            # grab the first module inside the Sequential (should be Conv2d)
+            conv = self.input_proj[i][0]
+            in_ch_expected = conv.weight.shape[1]
+            in_ch_actual = feat.shape[1]
+            print(f"   → level {i}: feat has {in_ch_actual} channels; proj‐conv expects {in_ch_expected} channels")
+
+            out = self.input_proj[i](feat)
+            print(f"      proj_feats[{i}].shape = {tuple(out.shape)}")  # (batch, hidden_dim, H, W)
+            proj_feats.append(out)
+
+        # if we need extra levels (num_levels > len(raw feats)), replicate last one
         if self.num_levels > len(proj_feats):
             len_srcs = len(proj_feats)
             for i in range(len_srcs, self.num_levels):
                 if i == len_srcs:
-                    proj_feats.append(self.input_proj[i](feats[-1]))
+                    conv = self.input_proj[i][0]
+                    in_ch_expected = conv.weight.shape[1]
+                    in_ch_actual = feats[-1].shape[1]
+                    print(f"   → extra level {i}: re‐using feats[-1], feat has {in_ch_actual} channels; proj‐conv expects {in_ch_expected} channels")
+                    out = self.input_proj[i](feats[-1])
                 else:
-                    proj_feats.append(self.input_proj[i](proj_feats[-1]))
+                    conv = self.input_proj[i][0]
+                    in_ch_expected = conv.weight.shape[1]
+                    in_ch_actual = proj_feats[-1].shape[1]
+                    print(f"   → extra level {i}: re‐using proj_feats[{i-1}], feat has {in_ch_actual} channels; proj‐conv expects {in_ch_expected} channels")
+                    out = self.input_proj[i](proj_feats[-1])
+                print(f"      proj_feats[{i}].shape = {tuple(out.shape)}")
+                proj_feats.append(out)
 
-        # get encoder inputs
+        # now flatten & record spatial shapes
         feat_flatten = []
         spatial_shapes = []
-        level_start_index = [0, ]
+        level_start_index = [0]
         for i, feat in enumerate(proj_feats):
-            _, _, h, w = feat.shape
+            b, c, h, w = feat.shape
+            print(f"   → flattening level {i}: proj_feats[{i}].shape = (b={b}, c={c}, h={h}, w={w})")
             # [b, c, h, w] -> [b, h*w, c]
-            feat_flatten.append(feat.flatten(2).permute(0, 2, 1))
-            # [num_levels, 2]
+            flatten = feat.flatten(2).permute(0, 2, 1)
+            feat_flatten.append(flatten)
             spatial_shapes.append([h, w])
-            # [l], start index of each level
             level_start_index.append(h * w + level_start_index[-1])
 
-        # [b, l, c]
-        feat_flatten = torch.concat(feat_flatten, 1)
-        level_start_index.pop()
-        return (feat_flatten, spatial_shapes, level_start_index)
+        # concatenate all levels along sequence dimension
+        feat_flatten = torch.concat(feat_flatten, dim=1)  # [b, sum(h_i*w_i), c]
+        level_start_index.pop()  # drop the extra trailing entry
+        print(f"↪️ _get_encoder_input returning: feat_flatten.shape = {tuple(feat_flatten.shape)}")
+        print(f"   spatial_shapes = {spatial_shapes}")
+        print(f"   level_start_index = {level_start_index}")
+
+        return feat_flatten, spatial_shapes, level_start_index
+
 
     def _generate_anchors(self,
                           spatial_shapes=None,

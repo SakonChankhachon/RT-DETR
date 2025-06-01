@@ -30,15 +30,14 @@ class RTDETR(nn.Module):
             sz = np.random.choice(self.multi_scale)
             x = F.interpolate(x, size=[sz, sz])
             
-        x = self.backbone(x)
-        x = self.encoder(x)        
-        x = self.decoder(x, targets)
-
-        return x
+        raw_feats = self.backbone(x)
+        _ = self.encoder(raw_feats)
+        out = self.decoder(raw_feats, targets)
+        return out
     
     def deploy(self, ):
-        self.eval()
-        for m in self.modules():
-            if hasattr(m, 'convert_to_deploy'):
-                m.convert_to_deploy()
-        return self 
+         self.eval()
+         for m in self.modules():
+             if hasattr(m, 'convert_to_deploy'):
+                 m.convert_to_deploy()
+         return self
