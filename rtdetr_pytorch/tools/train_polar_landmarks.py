@@ -1,0 +1,491 @@
+#!/usr/bin/env python
+"""
+Training script for RT-DETR with Polar Heatmap Face Landmarks
+Implements progressive training strategy and landmark-specific optimizations
+"""
+
+import os
+import sys
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), '..'))
+
+import argparse
+import torch
+import torch.nn as nn
+import numpy as np
+from pathlib import Path
+from collections import defaultdict
+
+import src.misc.dist as dist
+from src.core import YAMLConfig
+from src.solver import TASKS
+from src.misc import MetricLogger
+
+
+class PolarLandmarkTrainer:
+    """Custom trainer for polar heatmap-based face landmarks"""
+    
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
+        # Training phases for progressive learning
+        self.training_phases = [
+            {
+                'name': 'Phase 1: Detection Focus',
+                'epochs': (0, 30),
+                'lr_scale': 1.0,
+                'loss_weights': {
+                    'loss_vfl': 1.0,
+                    'loss_bbox': 5.0,
+                    'loss_giou': 2.0,
+                    'loss_landmarks': 1.0,
+                    'loss_heatmap': 0.5,
+                    'loss_orientation': 0.1,
+                    'loss_radius': 0.1,
+                },
+                'freeze_landmark_heads': False,
+            },
+            {
+                'name': 'Phase 2: Joint Learning',
+                'epochs': (30, 60),
+                'lr_scale': 1.0,
+                'loss_weights': {
+                    'loss_vfl': 1.0,
+                    'loss_bbox': 5.0,
+                    'loss_giou': 2.0,
+                    'loss_landmarks': 5.0,
+                    'loss_heatmap': 2.0,
+                    'loss_orientation': 1.0,
+                    'loss_radius': 1.0,
+                },
+                'freeze_landmark_heads': False,
+            },
+            {
+                'name': 'Phase 3: Landmark Refinement',
+                'epochs': (60, 100),
+                'lr_scale': 0.1,
+                'loss_weights': {
+                    'loss_vfl': 0.5,
+                    'loss_bbox': 3.0,
+                    'loss_giou': 1.0,
+                    'loss_landmarks': 10.0,
+                    'loss_heatmap': 5.0,
+                    'loss_orientation': 2.0,
+                    'loss_radius': 2.0,
+                },
+                'freeze_landmark_heads': False,
+            }
+        ]
+        
+    def get_current_phase(self, epoch):
+        """Get training phase for current epoch"""
+        for phase in self.training_phases:
+            if phase['epochs'][0] <= epoch < phase['epochs'][1]:
+                return phase
+        return self.training_phases[-1]
+    
+    def adjust_loss_weights(self, criterion, epoch):
+        """Dynamically adjust loss weights based on training phase"""
+        phase = self.get_current_phase(epoch)
+        
+        print(f"\n{phase['name']} (Epoch {epoch})")
+        print("Adjusting loss weights:")
+        
+        for loss_name, weight in phase['loss_weights'].items():
+            if loss_name in criterion.weight_dict:
+                old_weight = criterion.weight_dict[loss_name]
+                criterion.weight_dict[loss_name] = weight
+                print(f"  {loss_name}: {old_weight:.2f} -> {weight:.2f}")
+    
+    def compute_landmark_metrics(self, predictions, targets):
+        """Compute face landmark specific metrics"""
+        metrics = defaultdict(list)
+        
+        for pred, target in zip(predictions, targets):
+            if 'landmarks' not in pred or 'landmarks' not in target:
+                continue
+                
+            pred_landmarks = pred['landmarks'].cpu().numpy()
+            target_landmarks = target['landmarks'].cpu().numpy()
+            
+            # Skip if no faces
+            if len(pred_landmarks) == 0 or len(target_landmarks) == 0:
+                continue
+            
+            # Simple matching based on IoU
+            pred_boxes = pred['boxes'].cpu().numpy()
+            target_boxes = target['boxes'].cpu().numpy()
+            
+            for t_idx, t_box in enumerate(target_boxes):
+                # Find best matching prediction
+                if len(pred_boxes) > 0:
+                    ious = self.compute_iou(pred_boxes, t_box[None, :])
+                    best_idx = ious.argmax()
+                    
+                    if ious[best_idx] > 0.5:  # Match threshold
+                        # Compute landmark errors
+                        t_lmks = target_landmarks[t_idx].reshape(-1, 2)
+                        p_lmks = pred_landmarks[best_idx].reshape(-1, 2)
+                        
+                        # Per-landmark error (in pixels, assuming normalized coords)
+                        errors = np.linalg.norm(t_lmks - p_lmks, axis=1) * 640  # Scale to image size
+                        
+                        for i, error in enumerate(errors):
+                            metrics[f'landmark_{i}_error'].append(error)
+                        
+                        metrics['mean_landmark_error'].append(errors.mean())
+                        
+                        # Normalized Mean Error (NME)
+                        # Using inter-ocular distance as normalization
+                        if len(t_lmks) >= 2:
+                            iod = np.linalg.norm(t_lmks[0] - t_lmks[1])  # Distance between eyes
+                            nme = errors.mean() / (iod * 640) if iod > 0 else 0
+                            metrics['nme'].append(nme)
+        
+        # Compute mean metrics
+        mean_metrics = {}
+        for key, values in metrics.items():
+            if len(values) > 0:
+                mean_metrics[key] = np.mean(values)
+            else:
+                mean_metrics[key] = 0.0
+        
+        return mean_metrics
+    
+    def compute_iou(self, boxes1, boxes2):
+        """Compute IoU between two sets of boxes"""
+        x1 = np.maximum(boxes1[:, 0], boxes2[:, 0])
+        y1 = np.maximum(boxes1[:, 1], boxes2[:, 1])
+        x2 = np.minimum(boxes1[:, 2], boxes2[:, 2])
+        y2 = np.minimum(boxes1[:, 3], boxes2[:, 3])
+        
+        intersection = np.maximum(0, x2 - x1) * np.maximum(0, y2 - y1)
+        area1 = (boxes1[:, 2] - boxes1[:, 0]) * (boxes1[:, 3] - boxes1[:, 1])
+        area2 = (boxes2[:, 2] - boxes2[:, 0]) * (boxes2[:, 3] - boxes2[:, 1])
+        union = area1 + area2 - intersection
+        
+        return intersection / (union + 1e-6)
+    
+    def log_training_info(self, epoch, phase, train_stats, val_stats=None):
+        """Log detailed training information"""
+        print(f"\n{'='*60}")
+        print(f"Epoch {epoch} - {phase['name']}")
+        print(f"{'='*60}")
+        
+        # Training losses
+        print("\nTraining Losses:")
+        for key, value in train_stats.items():
+            if 'loss' in key:
+                print(f"  {key}: {value:.4f}")
+        
+        # Validation metrics
+        if val_stats:
+            print("\nValidation Metrics:")
+            
+            # Detection metrics
+            if 'coco_eval_bbox' in val_stats:
+                ap_metrics = val_stats['coco_eval_bbox']
+                print(f"  Face Detection:")
+                print(f"    AP@0.5: {ap_metrics[1]:.3f}")
+                print(f"    AP@0.75: {ap_metrics[2]:.3f}")
+                print(f"    AP (all): {ap_metrics[0]:.3f}")
+            
+            # Landmark metrics
+            landmark_keys = [k for k in val_stats.keys() if 'landmark' in k or 'nme' in k]
+            if landmark_keys:
+                print(f"  Face Landmarks:")
+                for key in sorted(landmark_keys):
+                    print(f"    {key}: {val_stats[key]:.3f}")
+        
+        print(f"{'='*60}\n")
+    
+    def visualize_predictions(self, images, predictions, targets, epoch, save_dir):
+        """Visualize predictions with polar heatmaps"""
+        import matplotlib.pyplot as plt
+        import matplotlib.patches as patches
+        
+        save_dir = Path(save_dir) / f'visualizations/epoch_{epoch}'
+        save_dir.mkdir(parents=True, exist_ok=True)
+        
+        for idx, (img, pred, target) in enumerate(zip(images[:3], predictions[:3], targets[:3])):
+            fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+            
+            # Original image with predictions
+            ax = axes[0]
+            img_np = img.cpu().permute(1, 2, 0).numpy()
+            img_np = (img_np - img_np.min()) / (img_np.max() - img_np.min())
+            ax.imshow(img_np)
+            
+            # Draw predicted boxes and landmarks
+            if 'boxes' in pred:
+                for box, lmks in zip(pred['boxes'], pred['landmarks']):
+                    # Draw box
+                    rect = patches.Rectangle(
+                        (box[0], box[1]), box[2]-box[0], box[3]-box[1],
+                        linewidth=2, edgecolor='g', facecolor='none'
+                    )
+                    ax.add_patch(rect)
+                    
+                    # Draw landmarks
+                    lmks = lmks.reshape(-1, 2)
+                    ax.scatter(lmks[:, 0], lmks[:, 1], c='r', s=20)
+            
+            ax.set_title('Predictions')
+            ax.axis('off')
+            
+            # Ground truth
+            ax = axes[1]
+            ax.imshow(img_np)
+            
+            if 'boxes' in target:
+                for box, lmks in zip(target['boxes'], target['landmarks']):
+                    # Draw box
+                    rect = patches.Rectangle(
+                        (box[0], box[1]), box[2]-box[0], box[3]-box[1],
+                        linewidth=2, edgecolor='b', facecolor='none'
+                    )
+                    ax.add_patch(rect)
+                    
+                    # Draw landmarks
+                    lmks = lmks.reshape(-1, 2)
+                    ax.scatter(lmks[:, 0], lmks[:, 1], c='r', s=20)
+            
+            ax.set_title('Ground Truth')
+            ax.axis('off')
+            
+            # Polar visualization (if available)
+            ax = axes[2]
+            ax.set_title('Polar Representation')
+            # This would show the polar heatmaps if available in outputs
+            ax.axis('off')
+            
+            plt.tight_layout()
+            plt.savefig(save_dir / f'sample_{idx}.png')
+            plt.close()
+
+
+def main(args):
+    """Main training function"""
+    
+    # Initialize distributed training
+    dist.init_distributed()
+    if args.seed is not None:
+        dist.set_seed(args.seed)
+    
+    # Load configuration
+    cfg = YAMLConfig(
+        args.config,
+        resume=args.resume,
+        use_amp=args.amp,
+        tuning=args.tuning
+    )
+    
+    # Override epochs if specified
+    if args.epochs:
+        cfg.epoches = args.epochs
+    
+    # Create custom trainer
+    trainer = PolarLandmarkTrainer(cfg)
+    
+    # Create solver with modified training loop
+    solver = TASKS[cfg.yaml_cfg['task']](cfg)
+    
+    if args.test_only:
+        print("Running evaluation only...")
+        solver.val()
+        return
+    
+    # Custom training loop with progressive learning
+    print("Starting Polar Heatmap Face Landmark Training...")
+    print(f"Total epochs: {cfg.epoches}")
+    print(f"Number of training phases: {len(trainer.training_phases)}")
+    
+    # Setup solver for training
+    solver.setup()
+    solver.optimizer = cfg.optimizer
+    solver.lr_scheduler = cfg.lr_scheduler
+    
+    if cfg.resume:
+        print(f'Resume checkpoint from {cfg.resume}')
+        solver.resume(cfg.resume)
+    
+    # Wrap dataloaders
+    solver.train_dataloader = dist.warp_loader(
+        cfg.train_dataloader, 
+        shuffle=cfg.train_dataloader.shuffle
+    )
+    solver.val_dataloader = dist.warp_loader(
+        cfg.val_dataloader,
+        shuffle=cfg.val_dataloader.shuffle
+    )
+    
+    # Training loop
+    best_metric = 0.0
+    best_epoch = -1
+    
+    for epoch in range(solver.last_epoch + 1, cfg.epoches):
+        # Update loss weights based on training phase
+        trainer.adjust_loss_weights(solver.criterion, epoch)
+        
+        # Get current phase
+        phase = trainer.get_current_phase(epoch)
+        
+        # Adjust learning rate if needed
+        if hasattr(phase, 'lr_scale'):
+            for param_group in solver.optimizer.param_groups:
+                param_group['lr'] *= phase['lr_scale']
+        
+        # Train one epoch
+        if dist.is_dist_available_and_initialized():
+            solver.train_dataloader.sampler.set_epoch(epoch)
+        
+        # Standard training
+        solver.model.train()
+        metric_logger = MetricLogger(delimiter="  ")
+        
+        for samples, targets in metric_logger.log_every(
+            solver.train_dataloader, 
+            cfg.log_step, 
+            header=f'Epoch: [{epoch}]'
+        ):
+            samples = samples.to(solver.device)
+            targets = [{k: v.to(solver.device) for k, v in t.items()} for t in targets]
+            
+            # Forward pass
+            outputs = solver.model(samples, targets)
+            loss_dict = solver.criterion(outputs, targets)
+            
+            # Compute total loss
+            losses = sum(loss_dict[k] * solver.criterion.weight_dict[k] 
+                        for k in loss_dict.keys() if k in solver.criterion.weight_dict)
+            
+            # Backward pass
+            solver.optimizer.zero_grad()
+            losses.backward()
+            if cfg.clip_max_norm > 0:
+                torch.nn.utils.clip_grad_norm_(solver.model.parameters(), cfg.clip_max_norm)
+            solver.optimizer.step()
+            
+            # Update EMA if used
+            if solver.ema is not None:
+                solver.ema.update(solver.model)
+            
+            # Log metrics
+            metric_logger.update(loss=losses.item(), **loss_dict)
+        
+        # Update learning rate
+        solver.lr_scheduler.step()
+        
+        # Get training stats
+        train_stats = {k: meter.global_avg for k, meter in metric_logger.meters.items()}
+        
+        # Validation
+        val_stats = None
+        if epoch % args.val_freq == 0 or epoch == cfg.epoches - 1:
+            print(f"\nRunning validation at epoch {epoch}...")
+            
+            # Standard validation
+            module = solver.ema.module if solver.ema else solver.model
+            test_stats, coco_evaluator = evaluate(
+                module, solver.criterion, solver.postprocessor,
+                solver.val_dataloader, get_coco_api_from_dataset(solver.val_dataloader.dataset),
+                solver.device, solver.output_dir
+            )
+            
+            # Compute landmark-specific metrics
+            solver.model.eval()
+            all_predictions = []
+            all_targets = []
+            
+            with torch.no_grad():
+                for samples, targets in solver.val_dataloader:
+                    samples = samples.to(solver.device)
+                    targets = [{k: v.to(solver.device) for k, v in t.items()} for t in targets]
+                    
+                    outputs = module(samples)
+                    orig_sizes = torch.stack([t["orig_size"] for t in targets], dim=0)
+                    results = solver.postprocessor(outputs, orig_sizes)
+                    
+                    all_predictions.extend(results)
+                    all_targets.extend(targets)
+            
+            # Compute landmark metrics
+            landmark_metrics = trainer.compute_landmark_metrics(all_predictions, all_targets)
+            test_stats.update(landmark_metrics)
+            
+            val_stats = test_stats
+            
+            # Check if best model
+            current_metric = landmark_metrics.get('nme', 1.0)  # Lower is better for NME
+            if current_metric < best_metric or best_metric == 0:
+                best_metric = current_metric
+                best_epoch = epoch
+                
+                # Save best model
+                best_path = solver.output_dir / 'best_model.pth'
+                dist.save_on_master(solver.state_dict(epoch), best_path)
+                print(f"New best model saved! NME: {current_metric:.4f}")
+        
+        # Log training information
+        trainer.log_training_info(epoch, phase, train_stats, val_stats)
+        
+        # Save checkpoint
+        if (epoch + 1) % cfg.checkpoint_step == 0:
+            checkpoint_path = solver.output_dir / f'checkpoint{epoch:04}.pth'
+            dist.save_on_master(solver.state_dict(epoch), checkpoint_path)
+        
+        # Visualize predictions (optional)
+        if args.visualize and epoch % args.vis_freq == 0:
+            with torch.no_grad():
+                samples, targets = next(iter(solver.val_dataloader))
+                samples = samples.to(solver.device)
+                targets = [{k: v.to(solver.device) for k, v in t.items()} for t in targets]
+                
+                outputs = solver.model(samples)
+                orig_sizes = torch.stack([t["orig_size"] for t in targets], dim=0)
+                results = solver.postprocessor(outputs, orig_sizes)
+                
+                trainer.visualize_predictions(
+                    samples, results, targets, epoch, solver.output_dir
+                )
+    
+    print(f"\nTraining completed!")
+    print(f"Best model: Epoch {best_epoch} with NME: {best_metric:.4f}")
+
+
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='RT-DETR Polar Heatmap Face Landmark Training')
+    
+    # Basic arguments
+    parser.add_argument('--config', '-c', type=str, required=True,
+                       help='Path to config file')
+    parser.add_argument('--resume', '-r', type=str,
+                       help='Resume from checkpoint')
+    parser.add_argument('--tuning', '-t', type=str,
+                       help='Fine-tuning from pretrained model')
+    parser.add_argument('--test-only', action='store_true',
+                       help='Only run evaluation')
+    
+    # Training arguments
+    parser.add_argument('--epochs', type=int,
+                       help='Override number of epochs')
+    parser.add_argument('--amp', action='store_true',
+                       help='Use automatic mixed precision')
+    parser.add_argument('--seed', type=int,
+                       help='Random seed')
+    
+    # Validation and visualization
+    parser.add_argument('--val-freq', type=int, default=5,
+                       help='Validation frequency')
+    parser.add_argument('--visualize', action='store_true',
+                       help='Enable visualization')
+    parser.add_argument('--vis-freq', type=int, default=10,
+                       help='Visualization frequency')
+    
+    args = parser.parse_args()
+    
+    # Import required modules
+    from src.data import get_coco_api_from_dataset
+    from src.solver.det_engine import evaluate
+    
+    main(args)
