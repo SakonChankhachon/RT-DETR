@@ -1,3 +1,4 @@
+# configs/rtdetr/include/rtdetr_face_landmark_fixed.yml
 task: detection
 
 model: RTDETR
@@ -9,9 +10,9 @@ RTDETR:
   backbone: PResNet
   encoder: HybridEncoder
   decoder: RTDETRTransformerPolarLandmark
-  multi_scale: [480, 512, 544, 576, 608, 640, 640, 640, 672, 704, 736, 768, 800]
+  multi_scale: [640]  # ✅ ใช้ fixed size แทน multi-scale
 
-# Backbone configuration
+# Backbone configuration  
 PResNet:
   depth: 50
   variant: d
@@ -21,10 +22,10 @@ PResNet:
   freeze_norm: True
   pretrained: True
 
-# Encoder configuration
+# Fixed Encoder configuration
 HybridEncoder:
-  in_channels: [512, 1024, 2048]   # <— แก้ให้ตรงกับ output ของ PResNet stage 2–4
-  feat_strides: [4, 8, 16]
+  in_channels: [512, 1024, 2048]
+  feat_strides: [8, 16, 32]  # ✅ แก้ให้ตรงกับ PResNet output
   hidden_dim: 256 
   use_encoder_idx: [2]
   num_encoder_layers: 1
@@ -36,18 +37,18 @@ HybridEncoder:
   expansion: 1.0
   depth_mult: 1
   act: 'silu'
-  eval_spatial_size: [640, 640]
+  eval_spatial_size: [640, 640]  # ✅ Fixed evaluation size
 
 # Decoder configuration with polar landmark
 RTDETRTransformerPolarLandmark:
-  in_channels: [512, 1024, 2048]
-  feat_channels: [256, 512, 1024]
-  feat_strides: [4, 8, 16]
+  in_channels: [512, 1024, 2048]  # ✅ เพิ่ม in_channels
+  feat_channels: [512, 1024, 2048]   # ✅ output จาก encoder
+  feat_strides: [8, 16, 32]
   hidden_dim: 256
   num_levels: 3
   num_queries: 300
   num_decoder_layers: 6
-  num_denoising: 0       # ← set this to 0
+  num_denoising: 0       # ✅ disable denoising ก่อน
   eval_idx: -1
   eval_spatial_size: [640, 640]
   num_classes: 1
@@ -55,7 +56,6 @@ RTDETRTransformerPolarLandmark:
   num_orientations: 8
   heatmap_size: 64
   landmark_loss_weight: 5.0
-
 
 # Loss configuration
 use_focal_loss: True
@@ -88,8 +88,7 @@ PolarLandmarkCriterion:
     loss_radius: 1.0
   }
 
-  # ต้องมีบรรทัดนี้ ไม่งั้น losses ถูกตั้งเป็น None แล้วเกิด TypeError
-  losses: ['vfl', 'boxes', 'landmarks']
+  losses: ['vfl', 'boxes', 'landmarks']  # ✅ ต้องมีบรรทัดนี้
   alpha: 0.75
   gamma: 2.0
 
@@ -98,5 +97,3 @@ PolarLandmarkCriterion:
     weight_dict: { cost_class: 2, cost_bbox: 5, cost_giou: 2 }
     alpha: 0.25
     gamma: 2.0
-
-

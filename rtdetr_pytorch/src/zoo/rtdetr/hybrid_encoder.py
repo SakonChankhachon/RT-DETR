@@ -1,5 +1,6 @@
+# src/zoo/rtdetr/hybrid_encoder_fixed.py
 """
-by lyuwenyu
+Fixed HybridEncoder with proper dynamic positional embedding
 """
 
 import copy
@@ -8,9 +9,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from .utils import get_activation
-
 from src.core import register
-
 
 __all__ = ['HybridEncoder']
 
@@ -49,42 +48,6 @@ class RepVggBlock(nn.Module):
             y = self.conv1(x) + self.conv2(x)
         return self.act(y)
 
-    def convert_to_deploy(self):
-        if not hasattr(self, 'conv'):
-            self.conv = nn.Conv2d(self.ch_in, self.ch_out, 3, 1, padding=1)
-
-        kernel, bias = self.get_equivalent_kernel_bias()
-        self.conv.weight.data = kernel
-        self.conv.bias.data = bias
-
-    def get_equivalent_kernel_bias(self):
-        kernel3x3, bias3x3 = self._fuse_bn_tensor(self.conv1)
-        kernel1x1, bias1x1 = self._fuse_bn_tensor(self.conv2)
-        return (
-            kernel3x3 + self._pad_1x1_to_3x3_tensor(kernel1x1),
-            bias3x3 + bias1x1
-        )
-
-    def _pad_1x1_to_3x3_tensor(self, kernel1x1):
-        if kernel1x1 is None:
-            return 0
-        else:
-            # pad a 1×1 kernel to 3×3 with zeros around
-            return F.pad(kernel1x1, [1, 1, 1, 1])
-
-    def _fuse_bn_tensor(self, branch: ConvNormLayer):
-        if branch is None:
-            return 0, 0
-        kernel = branch.conv.weight
-        running_mean = branch.norm.running_mean
-        running_var = branch.norm.running_var
-        gamma = branch.norm.weight
-        beta = branch.norm.bias
-        eps = branch.norm.eps
-        std = (running_var + eps).sqrt()
-        t = (gamma / std).reshape(-1, 1, 1, 1)
-        return kernel * t, beta - running_mean * gamma / std
-
 
 class CSPRepLayer(nn.Module):
     def __init__(
@@ -116,7 +79,6 @@ class CSPRepLayer(nn.Module):
         return self.conv3(x_1 + x_2)
 
 
-# transformer
 class TransformerEncoderLayer(nn.Module):
     def __init__(
         self,
@@ -193,7 +155,7 @@ class HybridEncoder(nn.Module):
     def __init__(
         self,
         in_channels=[512, 1024, 2048],
-        feat_strides=[4, 8, 16],
+        feat_strides=[8, 16, 32],
         hidden_dim=256,
         nhead=8,
         dim_feedforward=1024,
@@ -262,17 +224,6 @@ class HybridEncoder(nn.Module):
                 CSPRepLayer(hidden_dim * 2, hidden_dim, round(3 * depth_mult), act=act, expansion=expansion)
             )
 
-        # We no longer cache a 'pos_embed' buffer at init. Instead, we
-        # will always recompute it “on‐the‐fly” using the actual (h, w)
-        # in the forward pass. This ensures no size mismatch in eval.
-        # So we do not need _reset_parameters() to register any buffer here.
-
-        self._reset_parameters()
-
-    def _reset_parameters(self):
-        # We no longer register any 'pos_embed' buffers. Nothing to do.
-        return
-
     @staticmethod
     def build_2d_sincos_position_embedding(w, h, embed_dim=256, temperature=10000.):
         """
@@ -295,14 +246,13 @@ class HybridEncoder(nn.Module):
         # Concatenate sin/cos embeddings: [1, (w*h), embed_dim]
         return torch.cat([out_w.sin(), out_w.cos(), out_h.sin(), out_h.cos()], dim=1)[None, :, :]
 
-    def forward(self, feats: list[torch.Tensor]) -> list[torch.Tensor]:
+    def forward(self, feats: list) -> list:
         """
         Args:
             feats: list of feature maps from backbone, one per in_channels.
-                   Each `feat` has shape [B, C_i, H_i, W_i], where (C_i, H_i, W_i)
-                   matches `self.in_channels[i]` and `H_i = input_size / feat_strides[i]`.
+                   Each `feat` has shape [B, C_i, H_i, W_i]
         Returns:
-            outs: list of 3 merged/pan‐joined feature maps, each [B, hidden_dim, H_out_i, W_out_i].
+            outs: list of merged/pan‐joined feature maps, each [B, hidden_dim, H_out_i, W_out_i].
         """
         assert len(feats) == len(self.in_channels)
 
@@ -318,9 +268,27 @@ class HybridEncoder(nn.Module):
                 # Flatten to [B, h*w, hidden_dim]
                 src_flatten = proj_feats[enc_ind].flatten(2).permute(0, 2, 1)
 
-                # Always recompute pos_embed using the actual (w, h) from this feature
-                pos_embed = self.build_2d_sincos_position_embedding(w, h, self.hidden_dim, self.pe_temperature)
+                # ✅ Always recompute pos_embed using the actual (w, h) from this feature
+                pos_embed = self.build_2d_sincos_position_embedding(
+                    w, h, self.hidden_dim, self.pe_temperature
+                )
                 pos_embed = pos_embed.to(src_flatten.device)
+
+                # ✅ Ensure pos_embed matches src_flatten sequence length
+                expected_seq_len = h * w
+                actual_seq_len = src_flatten.shape[1]
+                pos_seq_len = pos_embed.shape[1]
+                
+                if pos_seq_len != actual_seq_len:
+                    print(f"WARNING: pos_embed seq_len {pos_seq_len} != src seq_len {actual_seq_len}")
+                    # Reshape pos_embed to match
+                    if pos_seq_len > actual_seq_len:
+                        pos_embed = pos_embed[:, :actual_seq_len, :]
+                    else:
+                        # Pad with zeros if needed
+                        pad_size = actual_seq_len - pos_seq_len
+                        padding = torch.zeros(1, pad_size, self.hidden_dim, device=pos_embed.device)
+                        pos_embed = torch.cat([pos_embed, padding], dim=1)
 
                 # Run it through a small TransformerEncoder
                 memory = self.encoder[enc_i](src_flatten, pos_embed=pos_embed)
@@ -329,7 +297,7 @@ class HybridEncoder(nn.Module):
                 proj_feats[enc_ind] = memory.permute(0, 2, 1).reshape(b, self.hidden_dim, h, w).contiguous()
 
         # 3) Top‐down FPN: start from highest‐level projection, go downward
-        inner_outs = [proj_feats[-1]]  # start with the “deepest” feature (lowest spatial res)
+        inner_outs = [proj_feats[-1]]  # start with the "deepest" feature (lowest spatial res)
         for idx in range(len(self.in_channels) - 1, 0, -1):
             feat_high = inner_outs[0]                # (the one we just computed)
             feat_low = proj_feats[idx - 1]           # the next shallower feature
@@ -351,5 +319,4 @@ class HybridEncoder(nn.Module):
             out = self.pan_blocks[idx](fused)
             outs.append(out)
 
-        # outs now has exactly len(in_channels) items, each B×hidden_dim×(H_out_i)×(W_out_i)
         return outs

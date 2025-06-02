@@ -199,69 +199,57 @@ class PolarLandmarkTrainer:
         
         print(f"{'='*60}\n")
     
-    def visualize_predictions(self, images, predictions, targets, epoch, save_dir):
-        """Visualize predictions with polar heatmaps"""
-        import matplotlib.pyplot as plt
-        import matplotlib.patches as patches
-        
-        save_dir = Path(save_dir) / f'visualizations/epoch_{epoch}'
-        save_dir.mkdir(parents=True, exist_ok=True)
-        
-        for idx, (img, pred, target) in enumerate(zip(images[:3], predictions[:3], targets[:3])):
-            fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-            
-            # Original image with predictions
-            ax = axes[0]
-            img_np = img.cpu().permute(1, 2, 0).numpy()
-            img_np = (img_np - img_np.min()) / (img_np.max() - img_np.min())
-            ax.imshow(img_np)
-            
-            # Draw predicted boxes and landmarks
-            if 'boxes' in pred:
-                for box, lmks in zip(pred['boxes'], pred['landmarks']):
-                    # Draw box
+    def visualize_predictions(self, samples, outputs, *args):
+            """
+            Draw boxes and landmarks on images and save to a directory.
+            During validation, the trainer calls:
+                visualize_predictions(samples, outputs, targets, coco_evaluator, save_dir)
+            Here we accept *args and simply pull off the last element as `save_dir`.
+            """
+            # The last positional argument is always the directory.
+            save_dir = args[-1]
+            os.makedirs(save_dir, exist_ok=True)
+
+            for i, (sample, output) in enumerate(zip(samples, outputs)):
+                # sample['image'] is a tensor [3,H,W] on GPU → move to CPU & to numpy
+                img = sample['image'].detach().cpu().permute(1, 2, 0).numpy()
+
+                # Predicted boxes: [Q,4] in cxcywh (normalized 0–1), convert to pixel coords
+                H_img, W_img = img.shape[:2]
+                boxes = output['pred_boxes'].detach().cpu().numpy()
+                # If these are normalized, multiply by width/height:
+                boxes[:, 0] *= W_img  # cx
+                boxes[:, 1] *= H_img  # cy
+                boxes[:, 2] *= W_img  # w
+                boxes[:, 3] *= H_img  # h
+
+                # Predicted landmarks: [Q, 2*L], already in normalized [0..1]
+                lms = output['pred_landmarks'].detach().cpu().numpy()
+                num_landmarks = lms.shape[1] // 2
+                lms = lms.reshape(-1, num_landmarks, 2)
+                # Convert normalized to pixel coords:
+                lms[..., 0] *= W_img
+                lms[..., 1] *= H_img
+
+                fig, ax = plt.subplots(1, 1, figsize=(8, 8))
+                ax.imshow(img.astype(np.uint8))
+
+                # Draw each box + its landmarks
+                for box, pts in zip(boxes, lms):
+                    cx, cy, w, h = box
+                    x0 = cx - 0.5 * w
+                    y0 = cy - 0.5 * h
                     rect = patches.Rectangle(
-                        (box[0], box[1]), box[2]-box[0], box[3]-box[1],
-                        linewidth=2, edgecolor='g', facecolor='none'
+                        (x0, y0), w, h,
+                        linewidth=2, edgecolor='r', facecolor='none'
                     )
                     ax.add_patch(rect)
-                    
-                    # Draw landmarks
-                    lmks = lmks.reshape(-1, 2)
-                    ax.scatter(lmks[:, 0], lmks[:, 1], c='r', s=20)
-            
-            ax.set_title('Predictions')
-            ax.axis('off')
-            
-            # Ground truth
-            ax = axes[1]
-            ax.imshow(img_np)
-            
-            if 'boxes' in target:
-                for box, lmks in zip(target['boxes'], target['landmarks']):
-                    # Draw box
-                    rect = patches.Rectangle(
-                        (box[0], box[1]), box[2]-box[0], box[3]-box[1],
-                        linewidth=2, edgecolor='b', facecolor='none'
-                    )
-                    ax.add_patch(rect)
-                    
-                    # Draw landmarks
-                    lmks = lmks.reshape(-1, 2)
-                    ax.scatter(lmks[:, 0], lmks[:, 1], c='r', s=20)
-            
-            ax.set_title('Ground Truth')
-            ax.axis('off')
-            
-            # Polar visualization (if available)
-            ax = axes[2]
-            ax.set_title('Polar Representation')
-            # This would show the polar heatmaps if available in outputs
-            ax.axis('off')
-            
-            plt.tight_layout()
-            plt.savefig(save_dir / f'sample_{idx}.png')
-            plt.close()
+                    # draw landmarks
+                    ax.scatter(pts[:, 0], pts[:, 1], s=10, c='b')
+
+                plt.axis('off')
+                plt.savefig(f"{save_dir}/pred_{i:04d}.png", bbox_inches='tight', pad_inches=0)
+                plt.close(fig)
 
 
 def main(args):
@@ -454,9 +442,8 @@ def main(args):
                 orig_sizes = torch.stack([t["orig_size"] for t in targets], dim=0)
                 results = solver.postprocessor(outputs, orig_sizes)
                 
-                trainer.visualize_predictions(
-                    samples, results, targets, epoch, solver.output_dir
-                )
+                trainer.visualize_predictions(samples, outputs, targets, coco_evaluator, args.save_dir)
+
     
     print(f"\nTraining completed!")
     print(f"Best model: Epoch {best_epoch} with NME: {best_metric:.4f}")

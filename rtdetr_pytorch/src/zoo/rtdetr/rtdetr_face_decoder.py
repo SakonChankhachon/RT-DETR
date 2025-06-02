@@ -191,19 +191,83 @@ class RTDETRTransformerPolarLandmark(RTDETRTransformer):
         num_orientations=8,
         heatmap_size=64,
         landmark_loss_weight=5.0,
-        in_channels=(256, 512, 1024),
+        in_channels=[512, 1024, 2048],  # Changed to list to match parent
+        # Include all parent class parameters
+        hidden_dim=256,
+        num_queries=300,
+        position_embed_type='sine',
+        feat_channels=[512, 1024, 2048],
+        feat_strides=[8, 16, 32],
+        num_levels=3,
+        num_decoder_points=4,
+        nhead=8,
+        num_decoder_layers=6,
+        dim_feedforward=1024,
+        dropout=0.,
+        activation="relu",
+        num_denoising=100,
+        label_noise_ratio=0.5,
+        box_noise_scale=1.0,
+        learnt_init_query=False,
+        eval_spatial_size=None,
+        eval_idx=-1,
+        eps=1e-2,
+        aux_loss=True,
         **kwargs
     ):
-        # Prevent any collision with RTDETRTransformer kwargs
-        kwargs.pop("num_landmarks", None)
-        super().__init__(num_classes=num_classes, in_channels=in_channels, **kwargs)
+        # Make feat_channels match in_channels if not provided
+        if 'feat_channels' not in kwargs and feat_channels == [512, 1024, 2048]:
+            feat_channels = in_channels
+            
+        # Initialize parent class with all parameters
+        super().__init__(
+            num_classes=num_classes,
+            hidden_dim=hidden_dim,
+            in_channels=in_channels,
+            num_queries=num_queries,
+            position_embed_type=position_embed_type,
+            feat_channels=feat_channels,
+            feat_strides=feat_strides,
+            num_levels=num_levels,
+            num_decoder_points=num_decoder_points,
+            nhead=nhead,
+            num_decoder_layers=num_decoder_layers,
+            dim_feedforward=dim_feedforward,
+            dropout=dropout,
+            activation=activation,
+            num_denoising=num_denoising,
+            label_noise_ratio=label_noise_ratio,
+            box_noise_scale=box_noise_scale,
+            learnt_init_query=learnt_init_query,
+            eval_spatial_size=eval_spatial_size,
+            eval_idx=eval_idx,
+            eps=eps,
+            aux_loss=aux_loss
+        )
+        
+        # Debug: Check what attributes were set by parent
+        print(f"DEBUG: After parent init, eval_idx = {getattr(self, 'eval_idx', 'NOT SET')}")
+        print(f"DEBUG: num_decoder_layers = {self.num_decoder_layers}")
+        print(f"DEBUG: decoder type = {type(self.decoder)}")
 
+        # Face landmark specific attributes
         self.num_landmarks = num_landmarks
         self.num_orientations = num_orientations
         self.heatmap_size = heatmap_size
         self.landmark_loss_weight = landmark_loss_weight
+        
+        # Ensure eval_idx is set (inherited from parent)
+        if not hasattr(self, 'eval_idx'):
+            print(f"WARNING: eval_idx not set by parent, setting to {eval_idx}")
+            self.eval_idx = eval_idx
+        
+        # Also ensure decoder has eval_idx
+        if hasattr(self, 'decoder') and hasattr(self.decoder, 'eval_idx'):
+            print(f"DEBUG: decoder.eval_idx = {self.decoder.eval_idx}")
+        else:
+            print(f"WARNING: decoder does not have eval_idx")
 
-        # Replace each decoder layer’s landmark head
+        # Replace each decoder layer's landmark head
         self.dec_landmark_heads = nn.ModuleList([
             PolarHeatmapHead(
                 hidden_dim=self.hidden_dim,
@@ -313,11 +377,15 @@ class RTDETRTransformerPolarLandmark(RTDETRTransformer):
                         self.dec_bbox_head[i](output) +
                         inverse_sigmoid(ref_points)
                     ))
-            elif i == self.eval_idx:
-                out_logits.append(inter_class_logits)
-                out_bboxes.append(inter_ref_bbox)
-                out_landmarks.append(landmarks)
-                break
+            else:
+                # validation: if this is the chosen eval_idx, or if eval_idx < 0 (use last layer),
+                # always fall back to the very last layer
+                last_layer = self.num_decoder_layers - 1
+                if i == self.eval_idx or i == last_layer:
+                    out_logits.append(inter_class_logits)
+                    out_bboxes.append(inter_ref_bbox)
+                    out_landmarks.append(landmarks)
+                    break
 
             ref_points = inter_ref_bbox
             ref_points_detach = inter_ref_bbox.detach() if self.training else inter_ref_bbox
@@ -327,7 +395,7 @@ class RTDETRTransformerPolarLandmark(RTDETRTransformer):
         out_logits = torch.stack(out_logits)        # [num_layers, B, Q, num_classes]
         out_landmarks = torch.stack(out_landmarks)  # [num_layers, B, Q, num_landmarks*2]
 
-        # 5) If denoising, split off the “denoising” portion
+        # 5) If denoising, split off the "denoising" portion
         if self.training and dn_meta is not None:
             dn_split = dn_meta['dn_num_split']
             (
@@ -347,7 +415,7 @@ class RTDETRTransformerPolarLandmark(RTDETRTransformer):
             'pred_landmarks': out_landmarks[-1]  # [B, Q, num_landmarks*2]
         }
 
-        # 7) If training & aux_loss, append each intermediate layer’s outputs
+        # 7) If training & aux_loss, append each intermediate layer's outputs
         if self.training and self.aux_loss:
             out['aux_outputs'] = []
             for j in range(len(out_logits) - 1):
@@ -358,10 +426,9 @@ class RTDETRTransformerPolarLandmark(RTDETRTransformer):
                 }
                 out['aux_outputs'].append(aux_out)
 
-            # → We deliberately skip adding encoder‐level landmarks here, because during validation
-            #    the encoder's “Q” (flattened tokens) does not match the “Q” of enc_topk_bboxes.
-            #    If you do want encoder landmarks, you must ensure that `enc_output(memory)`
-            #    and `enc_topk_bboxes` share the same “num_queries” dimension.
+            # Skip encoder auxiliary outputs for now to avoid dimension mismatch
+            # The encoder operates on all spatial positions (8400) while decoder
+            # operates on selected queries (300), making direct landmark prediction difficult
 
             if self.training and dn_meta is not None:
                 out['dn_aux_outputs'] = []
