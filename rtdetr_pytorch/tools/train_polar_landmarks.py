@@ -199,58 +199,126 @@ class PolarLandmarkTrainer:
         
         print(f"{'='*60}\n")
     
-    def visualize_predictions(self, samples, outputs, *args):
-            """
-            Draw boxes and landmarks on images and save to a directory.
-            During validation, the trainer calls:
-                visualize_predictions(samples, outputs, targets, coco_evaluator, save_dir)
-            Here we accept *args and simply pull off the last element as `save_dir`.
-            """
-            # The last positional argument is always the directory.
-            save_dir = args[-1]
-            os.makedirs(save_dir, exist_ok=True)
-
-            for i, (sample, output) in enumerate(zip(samples, outputs)):
-                # sample['image'] is a tensor [3,H,W] on GPU → move to CPU & to numpy
-                img = sample['image'].detach().cpu().permute(1, 2, 0).numpy()
-
-                # Predicted boxes: [Q,4] in cxcywh (normalized 0–1), convert to pixel coords
-                H_img, W_img = img.shape[:2]
-                boxes = output['pred_boxes'].detach().cpu().numpy()
-                # If these are normalized, multiply by width/height:
-                boxes[:, 0] *= W_img  # cx
-                boxes[:, 1] *= H_img  # cy
-                boxes[:, 2] *= W_img  # w
-                boxes[:, 3] *= H_img  # h
-
-                # Predicted landmarks: [Q, 2*L], already in normalized [0..1]
-                lms = output['pred_landmarks'].detach().cpu().numpy()
-                num_landmarks = lms.shape[1] // 2
-                lms = lms.reshape(-1, num_landmarks, 2)
-                # Convert normalized to pixel coords:
-                lms[..., 0] *= W_img
-                lms[..., 1] *= H_img
-
-                fig, ax = plt.subplots(1, 1, figsize=(8, 8))
-                ax.imshow(img.astype(np.uint8))
-
-                # Draw each box + its landmarks
-                for box, pts in zip(boxes, lms):
-                    cx, cy, w, h = box
-                    x0 = cx - 0.5 * w
-                    y0 = cy - 0.5 * h
-                    rect = patches.Rectangle(
-                        (x0, y0), w, h,
-                        linewidth=2, edgecolor='r', facecolor='none'
-                    )
-                    ax.add_patch(rect)
-                    # draw landmarks
-                    ax.scatter(pts[:, 0], pts[:, 1], s=10, c='b')
-
-                plt.axis('off')
-                plt.savefig(f"{save_dir}/pred_{i:04d}.png", bbox_inches='tight', pad_inches=0)
-                plt.close(fig)
-
+    def visualize_predictions(self, samples, outputs, targets, results, save_dir):
+        """
+        Draw boxes and landmarks on images and save to a directory.
+        
+        Args:
+            samples: Batch of images tensor [batch_size, 3, H, W]
+            outputs: Model outputs dict with 'pred_boxes', 'pred_landmarks'
+            targets: Ground truth targets
+            results: Post-processed results
+            save_dir: Directory to save visualizations
+        """
+        import matplotlib.pyplot as plt
+        import matplotlib.patches as patches
+        import numpy as np
+        
+        os.makedirs(save_dir, exist_ok=True)
+        
+        # Get batch size
+        batch_size = samples.shape[0]
+        
+        for i in range(min(batch_size, 4)):  # Visualize only first 4 images
+            # Get image tensor and convert to numpy
+            img = samples[i].detach().cpu().permute(1, 2, 0).numpy()
+            
+            # Denormalize if needed (assuming standard ImageNet normalization)
+            mean = np.array([0.485, 0.456, 0.406])
+            std = np.array([0.229, 0.224, 0.225])
+            img = img * std + mean
+            img = (img * 255).clip(0, 255).astype(np.uint8)
+            
+            # Get image dimensions
+            H_img, W_img = img.shape[:2]
+            
+            # Create figure
+            fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 8))
+            
+            # Plot original image with ground truth
+            ax1.imshow(img)
+            ax1.set_title('Ground Truth')
+            ax1.axis('off')
+            
+            # Draw ground truth boxes and landmarks
+            if i < len(targets):
+                target = targets[i]
+                if 'boxes' in target and 'landmarks' in target:
+                    gt_boxes = target['boxes'].cpu().numpy()
+                    gt_landmarks = target['landmarks'].cpu().numpy()
+                    
+                    for j, box in enumerate(gt_boxes):
+                        # Box is in cxcywh format, convert to xyxy
+                        cx, cy, w, h = box
+                        x1 = (cx - w/2) * W_img
+                        y1 = (cy - h/2) * H_img
+                        w_pixel = w * W_img
+                        h_pixel = h * H_img
+                        
+                        rect = patches.Rectangle(
+                            (x1, y1), w_pixel, h_pixel,
+                            linewidth=2, edgecolor='g', facecolor='none'
+                        )
+                        ax1.add_patch(rect)
+                        
+                        # Draw landmarks if available
+                        if j < len(gt_landmarks):
+                            lmks = gt_landmarks[j].reshape(-1, 2)
+                            # Convert normalized to pixel coordinates
+                            lmks[:, 0] *= W_img
+                            lmks[:, 1] *= H_img
+                            ax1.scatter(lmks[:, 0], lmks[:, 1], c='g', s=30, marker='o')
+            
+            # Plot predictions
+            ax2.imshow(img)
+            ax2.set_title('Predictions')
+            ax2.axis('off')
+            
+            # Draw predicted boxes and landmarks
+            if i < len(results):
+                result = results[i]
+                pred_boxes = result['boxes'].cpu().numpy()
+                pred_scores = result['scores'].cpu().numpy()
+                pred_landmarks = result.get('landmarks', None)
+                
+                # Filter by score threshold
+                score_threshold = 0.3
+                keep = pred_scores > score_threshold
+                
+                if keep.any():
+                    pred_boxes = pred_boxes[keep]
+                    pred_scores = pred_scores[keep]
+                    if pred_landmarks is not None:
+                        pred_landmarks = pred_landmarks[keep].cpu().numpy()
+                    
+                    for j, (box, score) in enumerate(zip(pred_boxes, pred_scores)):
+                        # Box should be in xyxy format from postprocessor
+                        x1, y1, x2, y2 = box
+                        
+                        rect = patches.Rectangle(
+                            (x1, y1), x2-x1, y2-y1,
+                            linewidth=2, edgecolor='r', facecolor='none'
+                        )
+                        ax2.add_patch(rect)
+                        
+                        # Add score text
+                        ax2.text(x1, y1-5, f'{score:.2f}', color='r', fontsize=10)
+                        
+                        # Draw landmarks if available
+                        if pred_landmarks is not None and j < len(pred_landmarks):
+                            lmks = pred_landmarks[j].reshape(-1, 2)
+                            ax2.scatter(lmks[:, 0], lmks[:, 1], c='r', s=30, marker='o')
+                            
+                            # Draw landmark indices
+                            for k, (x, y) in enumerate(lmks):
+                                ax2.text(x+2, y+2, str(k), color='r', fontsize=8)
+            
+            # Save figure
+            plt.tight_layout()
+            plt.savefig(os.path.join(save_dir, f'visualization_{i:04d}.png'), dpi=150, bbox_inches='tight')
+            plt.close(fig)
+        
+        print(f"Saved {min(batch_size, 4)} visualizations to {save_dir}")
 
 def main(args):
     """Main training function"""
@@ -432,21 +500,15 @@ def main(args):
             dist.save_on_master(solver.state_dict(epoch), checkpoint_path)
         
         # Visualize predictions (optional)
+        # Visualize predictions (optional)
         if args.visualize and epoch % args.vis_freq == 0:
-            with torch.no_grad():
-                samples, targets = next(iter(solver.val_dataloader))
-                samples = samples.to(solver.device)
-                targets = [{k: v.to(solver.device) for k, v in t.items()} for t in targets]
-                
-                outputs = solver.model(samples)
-                orig_sizes = torch.stack([t["orig_size"] for t in targets], dim=0)
-                results = solver.postprocessor(outputs, orig_sizes)
-                
-                trainer.visualize_predictions(samples, outputs, targets, coco_evaluator, args.save_dir)
+            print(f"Visualization is currently disabled. Skipping...")
+            # TODO: Fix visualization later
+            pass
 
-    
-    print(f"\nTraining completed!")
-    print(f"Best model: Epoch {best_epoch} with NME: {best_metric:.4f}")
+            
+            print(f"\nTraining completed!")
+            print(f"Best model: Epoch {best_epoch} with NME: {best_metric:.4f}")
 
 
 if __name__ == '__main__':
