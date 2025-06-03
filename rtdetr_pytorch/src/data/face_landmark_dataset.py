@@ -78,6 +78,23 @@ class FaceLandmarkDataset(torch.utils.data.Dataset):
         
         # Prepare targets
         boxes = torch.tensor(ann['boxes'], dtype=torch.float32)
+        # ถ้า boxes เป็น xyxy format ใน pixel coordinates
+        # ต้องแปลงเป็น cxcywh normalized
+        if boxes.max() > 1.0:  # ถ้ายังเป็น pixel coords
+            # Convert xyxy to cxcywh
+            x1, y1, x2, y2 = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
+            cx = (x1 + x2) / 2
+            cy = (y1 + y2) / 2
+            w = x2 - x1
+            h = y2 - y1
+            
+            # Normalize by image size
+            cx = cx / img.width
+            cy = cy / img.height
+            w = w / img.width
+            h = h / img.height
+            
+            boxes = torch.stack([cx, cy, w, h], dim=1)
         landmarks = torch.tensor(ann['landmarks'], dtype=torch.float32)
         
         # Normalize landmarks
