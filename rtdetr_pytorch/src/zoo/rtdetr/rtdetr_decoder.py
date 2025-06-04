@@ -427,7 +427,7 @@ class RTDETRTransformer(nn.Module):
 
     def _get_encoder_input(self, feats):
         # debug: how many levels we received
-        print(f"↪️ _get_encoder_input called with {len(feats)} levels of features")
+        #print(f"↪️ _get_encoder_input called with {len(feats)} levels of features")
 
         proj_feats = []
         for i, feat in enumerate(feats):
@@ -435,10 +435,10 @@ class RTDETRTransformer(nn.Module):
             conv = self.input_proj[i][0]
             in_ch_expected = conv.weight.shape[1]
             in_ch_actual = feat.shape[1]
-            print(f"   → level {i}: feat has {in_ch_actual} channels; proj‐conv expects {in_ch_expected} channels")
+            #print(f"   → level {i}: feat has {in_ch_actual} channels; proj‐conv expects {in_ch_expected} channels")
 
             out = self.input_proj[i](feat)
-            print(f"      proj_feats[{i}].shape = {tuple(out.shape)}")  # (batch, hidden_dim, H, W)
+            #print(f"      proj_feats[{i}].shape = {tuple(out.shape)}")  # (batch, hidden_dim, H, W)
             proj_feats.append(out)
 
         # if we need extra levels (num_levels > len(raw feats)), replicate last one
@@ -449,15 +449,15 @@ class RTDETRTransformer(nn.Module):
                     conv = self.input_proj[i][0]
                     in_ch_expected = conv.weight.shape[1]
                     in_ch_actual = feats[-1].shape[1]
-                    print(f"   → extra level {i}: re‐using feats[-1], feat has {in_ch_actual} channels; proj‐conv expects {in_ch_expected} channels")
+                    #print(f"   → extra level {i}: re‐using feats[-1], feat has {in_ch_actual} channels; proj‐conv expects {in_ch_expected} channels")
                     out = self.input_proj[i](feats[-1])
                 else:
                     conv = self.input_proj[i][0]
                     in_ch_expected = conv.weight.shape[1]
                     in_ch_actual = proj_feats[-1].shape[1]
-                    print(f"   → extra level {i}: re‐using proj_feats[{i-1}], feat has {in_ch_actual} channels; proj‐conv expects {in_ch_expected} channels")
+                    #print(f"   → extra level {i}: re‐using proj_feats[{i-1}], feat has {in_ch_actual} channels; proj‐conv expects {in_ch_expected} channels")
                     out = self.input_proj[i](proj_feats[-1])
-                print(f"      proj_feats[{i}].shape = {tuple(out.shape)}")
+                #print(f"      proj_feats[{i}].shape = {tuple(out.shape)}")
                 proj_feats.append(out)
 
         # now flatten & record spatial shapes
@@ -466,7 +466,7 @@ class RTDETRTransformer(nn.Module):
         level_start_index = [0]
         for i, feat in enumerate(proj_feats):
             b, c, h, w = feat.shape
-            print(f"   → flattening level {i}: proj_feats[{i}].shape = (b={b}, c={c}, h={h}, w={w})")
+            #print(f"   → flattening level {i}: proj_feats[{i}].shape = (b={b}, c={c}, h={h}, w={w})")
             # [b, c, h, w] -> [b, h*w, c]
             flatten = feat.flatten(2).permute(0, 2, 1)
             feat_flatten.append(flatten)
@@ -476,9 +476,9 @@ class RTDETRTransformer(nn.Module):
         # concatenate all levels along sequence dimension
         feat_flatten = torch.concat(feat_flatten, dim=1)  # [b, sum(h_i*w_i), c]
         level_start_index.pop()  # drop the extra trailing entry
-        print(f"↪️ _get_encoder_input returning: feat_flatten.shape = {tuple(feat_flatten.shape)}")
-        print(f"   spatial_shapes = {spatial_shapes}")
-        print(f"   level_start_index = {level_start_index}")
+        #print(f"↪️ _get_encoder_input returning: feat_flatten.shape = {tuple(feat_flatten.shape)}")
+        #print(f"   spatial_shapes = {spatial_shapes}")
+        #print(f"   level_start_index = {level_start_index}")
 
         return feat_flatten, spatial_shapes, level_start_index
 

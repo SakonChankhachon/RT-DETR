@@ -8,7 +8,7 @@ train_dataloader:
         - {type: ToImageTensor}
         - {type: ConvertDtype}
         - {type: SanitizeBoundingBox, min_size: 1}
-        - {type: ConvertBox, out_fmt: 'cxcywh', normalize: True}
+        #- {type: ConvertBox, out_fmt: 'cxcywh', normalize: True}  # ← ต้องมีบรรทัดนี้
   shuffle: True
   batch_size: 16
   num_workers: 4
@@ -21,6 +21,7 @@ val_dataloader:
         - {type: Resize, size: [640, 640]}
         - {type: ToImageTensor}
         - {type: ConvertDtype}
+        #- {type: ConvertBox, out_fmt: 'cxcywh', normalize: True}  # ← เพิ่มบรรทัดนี้
   shuffle: False
   batch_size: 8
   num_workers: 4
