@@ -20,14 +20,14 @@ class FaceLandmarkDataset(torch.utils.data.Dataset):
         self.return_visibility = return_visibility
         
         # Load annotations
-        if os.path.exists(ann_file):
-            with open(ann_file, 'r') as f:
-                self.annotations = json.load(f)
-            self.image_ids = list(self.annotations.keys())
-        else:
-            print(f"Warning: Annotation file {ann_file} not found. Using dummy data.")
-            self.annotations = {}
-            self.image_ids = []
+        if not os.path.exists(ann_file):
+            raise FileNotFoundError(
+                f"Annotation file '{ann_file}' not found. "
+                "Please check the dataset path.")
+
+        with open(ann_file, 'r') as f:
+            self.annotations = json.load(f)
+        self.image_ids = list(self.annotations.keys())
             
         # Create dummy data if needed
         if len(self.image_ids) == 0:
