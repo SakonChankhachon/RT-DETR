@@ -19,7 +19,10 @@ import src.misc.dist as dist
 from src.core import YAMLConfig
 from src.solver import TASKS
 from src.misc import MetricLogger
-
+# Apply COCO fix for normalized boxes
+import src.data.coco.coco_utils as coco_utils
+from src.data.coco.coco_utils_fixed import get_coco_api_from_dataset
+coco_utils.get_coco_api_from_dataset = get_coco_api_from_dataset
 
 class PolarLandmarkTrainer:
     """Custom trainer for polar heatmap-based face landmarks"""
@@ -593,7 +596,7 @@ if __name__ == '__main__':
     args = parser.parse_args()
     
     # Import required modules
-    from src.data import get_coco_api_from_dataset
+    #from src.data import get_coco_api_from_dataset
     from src.solver.det_engine import evaluate
     
     main(args)

@@ -1,11 +1,5 @@
-# src/data/coco/coco_utils_fixed.py
-"""
-Fixed COCO utilities that handle normalized cxcywh format correctly
-
-This file should replace src/data/coco/coco_utils.py
-"""
-
 import os
+
 import torch
 import torch.utils.data
 import torchvision
@@ -31,19 +25,14 @@ def convert_coco_poly_to_mask(segmentations, height, width):
 
 
 class ConvertCocoPolysToMask:
-    def __init__(self, return_masks=False, remap_mscoco_category=False):
-        self.return_masks = return_masks
-        self.remap_mscoco_category = remap_mscoco_category
-
     def __call__(self, image, target):
         w, h = image.size
 
         image_id = target["image_id"]
-        image_id = torch.tensor([image_id])
 
         anno = target["annotations"]
 
-        anno = [obj for obj in anno if 'iscrowd' not in obj or obj['iscrowd'] == 0]
+        anno = [obj for obj in anno if obj["iscrowd"] == 0]
 
         boxes = [obj["bbox"] for obj in anno]
         # guard against no boxes via resizing
@@ -52,16 +41,11 @@ class ConvertCocoPolysToMask:
         boxes[:, 0::2].clamp_(min=0, max=w)
         boxes[:, 1::2].clamp_(min=0, max=h)
 
-        if self.remap_mscoco_category:
-            classes = [mscoco_category2label[obj["category_id"]] for obj in anno]
-        else:
-            classes = [obj["category_id"] for obj in anno]
-            
+        classes = [obj["category_id"] for obj in anno]
         classes = torch.tensor(classes, dtype=torch.int64)
 
-        if self.return_masks:
-            segmentations = [obj["segmentation"] for obj in anno]
-            masks = convert_coco_poly_to_mask(segmentations, h, w)
+        segmentations = [obj["segmentation"] for obj in anno]
+        masks = convert_coco_poly_to_mask(segmentations, h, w)
 
         keypoints = None
         if anno and "keypoints" in anno[0]:
@@ -74,29 +58,24 @@ class ConvertCocoPolysToMask:
         keep = (boxes[:, 3] > boxes[:, 1]) & (boxes[:, 2] > boxes[:, 0])
         boxes = boxes[keep]
         classes = classes[keep]
-        if self.return_masks:
-            masks = masks[keep]
+        masks = masks[keep]
         if keypoints is not None:
             keypoints = keypoints[keep]
 
         target = {}
         target["boxes"] = boxes
         target["labels"] = classes
-        if self.return_masks:
-            target["masks"] = masks
+        target["masks"] = masks
         target["image_id"] = image_id
         if keypoints is not None:
             target["keypoints"] = keypoints
 
         # for conversion to coco api
         area = torch.tensor([obj["area"] for obj in anno])
-        iscrowd = torch.tensor([obj["iscrowd"] if "iscrowd" in obj else 0 for obj in anno])
-        target["area"] = area[keep]
-        target["iscrowd"] = iscrowd[keep]
+        iscrowd = torch.tensor([obj["iscrowd"] for obj in anno])
+        target["area"] = area
+        target["iscrowd"] = iscrowd
 
-        target["orig_size"] = torch.as_tensor([int(w), int(h)])
-        target["size"] = torch.as_tensor([int(w), int(h)])
-    
         return image, target
 
 
@@ -139,75 +118,35 @@ def _coco_remove_images_without_annotations(dataset, cat_list=None):
     return dataset
 
 
-def convert_normalized_cxcywh_to_coco_api(ds):
-    """
-    Convert dataset with normalized cxcywh boxes to COCO API format.
-    This is needed because COCO API expects boxes in xywh pixel coordinates.
-    """
+def convert_to_coco_api(ds):
     coco_ds = COCO()
     # annotation IDs need to start at 1, not 0, see torchvision issue #1530
     ann_id = 1
     dataset = {"images": [], "categories": [], "annotations": []}
     categories = set()
-    
     for img_idx in range(len(ds)):
-        # Get target data
+        # find better way to get target
+        # targets = ds.get_annotations(img_idx)
         img, targets = ds[img_idx]
         image_id = targets["image_id"].item()
-        
-        # Get image dimensions
-        if hasattr(img, 'shape'):
-            # Tensor format: C, H, W
-            height, width = img.shape[-2], img.shape[-1]
-        else:
-            # PIL format
-            width, height = img.size
-        
         img_dict = {}
         img_dict["id"] = image_id
-        img_dict["height"] = height
-        img_dict["width"] = width
+        img_dict["height"] = img.shape[-2]
+        img_dict["width"] = img.shape[-1]
         dataset["images"].append(img_dict)
-        
-        # Convert boxes from normalized cxcywh to pixel xywh
-        boxes = targets["boxes"].clone()
+        bboxes = targets["boxes"].clone()
+        bboxes[:, 2:] -= bboxes[:, :2]
+        bboxes = bboxes.tolist()
         labels = targets["labels"].tolist()
         areas = targets["area"].tolist()
         iscrowd = targets["iscrowd"].tolist()
-        
-        # Check if boxes are normalized (values between 0 and 1)
-        if boxes.numel() > 0 and boxes.max() <= 1.0:
-            # Convert from normalized cxcywh to pixel coordinates
-            cx = boxes[:, 0] * width
-            cy = boxes[:, 1] * height
-            w = boxes[:, 2] * width
-            h = boxes[:, 3] * height
-            
-            # Convert to xywh format (top-left corner)
-            x = cx - w/2
-            y = cy - h/2
-            
-            # Stack to get xywh format
-            boxes_xywh = torch.stack([x, y, w, h], dim=1)
-            bboxes = boxes_xywh.tolist()
-        else:
-            # Assume already in correct format
-            # Convert cxcywh to xywh
-            cx, cy, w, h = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
-            x = cx - w/2
-            y = cy - h/2
-            boxes_xywh = torch.stack([x, y, w, h], dim=1)
-            bboxes = boxes_xywh.tolist()
-        
         if "masks" in targets:
             masks = targets["masks"]
             # make masks Fortran contiguous for coco_mask
             masks = masks.permute(0, 2, 1).contiguous().permute(0, 2, 1)
-        
         if "keypoints" in targets:
             keypoints = targets["keypoints"]
             keypoints = keypoints.reshape(keypoints.shape[0], -1).tolist()
-        
         num_objs = len(bboxes)
         for i in range(num_objs):
             ann = {}
@@ -215,25 +154,16 @@ def convert_normalized_cxcywh_to_coco_api(ds):
             ann["bbox"] = bboxes[i]
             ann["category_id"] = labels[i]
             categories.add(labels[i])
-            
-            # Calculate area if not provided
-            if i < len(areas):
-                ann["area"] = areas[i] * width * height  # Convert normalized area to pixels
-            else:
-                ann["area"] = bboxes[i][2] * bboxes[i][3]  # width * height
-                
+            ann["area"] = areas[i]
             ann["iscrowd"] = iscrowd[i]
             ann["id"] = ann_id
-            
             if "masks" in targets:
                 ann["segmentation"] = coco_mask.encode(masks[i].numpy())
             if "keypoints" in targets:
                 ann["keypoints"] = keypoints[i]
                 ann["num_keypoints"] = sum(k != 0 for k in keypoints[i][2::3])
-            
             dataset["annotations"].append(ann)
             ann_id += 1
-    
     dataset["categories"] = [{"id": i} for i in sorted(categories)]
     coco_ds.dataset = dataset
     coco_ds.createIndex()
@@ -241,23 +171,14 @@ def convert_normalized_cxcywh_to_coco_api(ds):
 
 
 def get_coco_api_from_dataset(dataset):
-    """Get COCO API from dataset, handling normalized cxcywh format"""
     # FIXME: This is... awful?
     for _ in range(10):
         if isinstance(dataset, torchvision.datasets.CocoDetection):
             break
         if isinstance(dataset, torch.utils.data.Subset):
             dataset = dataset.dataset
-    
-    # Check if it's our custom FaceLandmarkDataset
-    if hasattr(dataset, '__class__') and dataset.__class__.__name__ == 'FaceLandmarkDataset':
-        return convert_normalized_cxcywh_to_coco_api(dataset)
-    elif isinstance(dataset, torchvision.datasets.CocoDetection):
+    if isinstance(dataset, torchvision.datasets.CocoDetection):
         return dataset.coco
-    else:
-        # Use the fixed conversion function
-        return convert_normalized_cxcywh_to_coco_api(dataset)
+    return convert_to_coco_api(dataset)
 
 
-# For backward compatibility
-convert_to_coco_api = convert_normalized_cxcywh_to_coco_api
