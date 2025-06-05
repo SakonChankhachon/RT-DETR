@@ -107,42 +107,52 @@ class PolarLandmarkTrainer:
         for pred, target in zip(predictions, targets):
             if 'landmarks' not in pred or 'landmarks' not in target:
                 continue
-                
+
             pred_landmarks = pred['landmarks'].cpu().numpy()
             target_landmarks = target['landmarks'].cpu().numpy()
-            
+
             # Skip if no faces
             if len(pred_landmarks) == 0 or len(target_landmarks) == 0:
                 continue
-            
-            # Simple matching based on IoU
+
+            # Convert ground truth boxes/landmarks to pixel xyxy for IoU and error computation
+            orig_w, orig_h = target['orig_size'].tolist()
+
+            gt_boxes_cxcywh = target['boxes'].cpu().numpy()
+            gt_boxes_xyxy = np.zeros_like(gt_boxes_cxcywh)
+            gt_boxes_xyxy[:, 0] = (gt_boxes_cxcywh[:, 0] - gt_boxes_cxcywh[:, 2] / 2) * orig_w
+            gt_boxes_xyxy[:, 1] = (gt_boxes_cxcywh[:, 1] - gt_boxes_cxcywh[:, 3] / 2) * orig_h
+            gt_boxes_xyxy[:, 2] = (gt_boxes_cxcywh[:, 0] + gt_boxes_cxcywh[:, 2] / 2) * orig_w
+            gt_boxes_xyxy[:, 3] = (gt_boxes_cxcywh[:, 1] + gt_boxes_cxcywh[:, 3] / 2) * orig_h
+
+            # Predicted boxes are already pixel xyxy
             pred_boxes = pred['boxes'].cpu().numpy()
-            target_boxes = target['boxes'].cpu().numpy()
-            
-            for t_idx, t_box in enumerate(target_boxes):
+
+            for t_idx, t_box in enumerate(gt_boxes_xyxy):
                 # Find best matching prediction
                 if len(pred_boxes) > 0:
                     ious = self.compute_iou(pred_boxes, t_box[None, :])
                     best_idx = ious.argmax()
-                    
+
                     if ious[best_idx] > 0.5:  # Match threshold
-                        # Compute landmark errors
+                        # Compute landmark errors in pixel space
                         t_lmks = target_landmarks[t_idx].reshape(-1, 2)
+                        t_lmks[:, 0] *= orig_w
+                        t_lmks[:, 1] *= orig_h
+
                         p_lmks = pred_landmarks[best_idx].reshape(-1, 2)
-                        
-                        # Per-landmark error (in pixels, assuming normalized coords)
-                        errors = np.linalg.norm(t_lmks - p_lmks, axis=1) * 640  # Scale to image size
-                        
+
+                        errors = np.linalg.norm(t_lmks - p_lmks, axis=1)
+
                         for i, error in enumerate(errors):
                             metrics[f'landmark_{i}_error'].append(error)
-                        
+
                         metrics['mean_landmark_error'].append(errors.mean())
-                        
-                        # Normalized Mean Error (NME)
-                        # Using inter-ocular distance as normalization
+
+                        # Normalized Mean Error (NME) using inter-ocular distance
                         if len(t_lmks) >= 2:
-                            iod = np.linalg.norm(t_lmks[0] - t_lmks[1])  # Distance between eyes
-                            nme = errors.mean() / (iod * 640) if iod > 0 else 0
+                            iod = np.linalg.norm(t_lmks[0] - t_lmks[1])
+                            nme = errors.mean() / iod if iod > 0 else 0
                             metrics['nme'].append(nme)
         
         # Compute mean metrics
