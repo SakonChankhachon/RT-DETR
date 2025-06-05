@@ -325,47 +325,62 @@ class PolarLandmarkTrainer:
 
 # เพิ่ม function นี้ก่อน main() function
 def fix_targets_boxes(targets):
-    """Fix boxes format from pixel xyxy to normalized cxcywh"""
+    """Ensure target boxes are in normalized cxcywh format.
+
+    The FaceLandmarkDataset already returns boxes as normalized
+    center\-x, center\-y, width and height. However, older annotation
+    formats may use pixel\-space ``xyxy`` coordinates. This helper now
+    checks the range of each box and only converts when needed.
+    """
+
     fixed_targets = []
+
     for target in targets:
-        target = {k: v.clone() if isinstance(v, torch.Tensor) else v for k, v in target.items()}
-        
+        target = {k: v.clone() if isinstance(v, torch.Tensor) else v
+                  for k, v in target.items()}
+
         if 'boxes' in target and target['boxes'].numel() > 0:
             boxes = target['boxes']
-            
-            # Get image size
-            if 'orig_size' in target:
-                orig_size = target['orig_size']
-                if isinstance(orig_size, torch.Tensor):
-                    w, h = orig_size[0].item(), orig_size[1].item()
-                else:
-                    w, h = orig_size
-            else:
-                w, h = 640, 640  # default
-            
-            # Check if boxes are in pixel coordinates
+
+            # Determine if boxes are in pixel coordinates
             if boxes.max() > 1.0:
-                # Normalize boxes
+                if 'orig_size' in target:
+                    orig_size = target['orig_size']
+                    if isinstance(orig_size, torch.Tensor):
+                        w, h = orig_size[0].item(), orig_size[1].item()
+                    else:
+                        w, h = orig_size
+                else:
+                    w, h = 640, 640
+
                 boxes = boxes.float()
                 boxes[:, [0, 2]] = boxes[:, [0, 2]] / w
                 boxes[:, [1, 3]] = boxes[:, [1, 3]] / h
-            
-            # Convert xyxy to cxcywh
+
+            # If boxes look like xyxy (x2 > x1 and y2 > y1), convert
             x1, y1, x2, y2 = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
-            cx = (x1 + x2) / 2
-            cy = (y1 + y2) / 2
-            width = x2 - x1
-            height = y2 - y1
-            
-            # Clamp to valid range
+            width_xyxy = x2 - x1
+            height_xyxy = y2 - y1
+
+            if (width_xyxy >= 0).all() and (height_xyxy >= 0).all():
+                # Values already normalized to [0, 1]; treat as xyxy
+                cx = (x1 + x2) / 2
+                cy = (y1 + y2) / 2
+                width = width_xyxy
+                height = height_xyxy
+            else:
+                # Assume boxes are already cxcywh
+                cx, cy, width, height = x1, y1, x2, y2
+
             cx = torch.clamp(cx, 0.0, 1.0)
             cy = torch.clamp(cy, 0.0, 1.0)
             width = torch.clamp(width, 0.0, 1.0)
             height = torch.clamp(height, 0.0, 1.0)
-            
+
             target['boxes'] = torch.stack([cx, cy, width, height], dim=1)
-            
+
         fixed_targets.append(target)
+
     return fixed_targets
 
 def main(args):
