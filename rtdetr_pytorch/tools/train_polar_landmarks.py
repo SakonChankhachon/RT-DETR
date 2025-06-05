@@ -465,7 +465,7 @@ def main(args):
             targets = [{k: v.to(solver.device) for k, v in t.items()} for t in targets]
             
             # Fix boxes format
-            targets = fix_targets_boxes(targets)
+            #targets = fix_targets_boxes(targets)
             
             # Forward pass
             outputs = solver.model(samples, targets)
