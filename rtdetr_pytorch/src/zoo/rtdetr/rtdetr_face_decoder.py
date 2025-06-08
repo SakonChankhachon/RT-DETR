@@ -64,8 +64,9 @@ class PolarHeatmapHead(nn.Module):
         y = torch.linspace(-1, 1, self.heatmap_size)
         yy, xx = torch.meshgrid(y, x, indexing='ij')
 
-        self.register_buffer('grid_x', xx)
-        self.register_buffer('grid_y', yy)
+        # Clone tensors to avoid memory aliasing issues
+        self.register_buffer('grid_x', xx.clone())
+        self.register_buffer('grid_y', yy.clone())
         self.register_buffer('grid_r', torch.sqrt(xx**2 + yy**2))
         self.register_buffer('grid_theta', torch.atan2(yy, xx))
 
