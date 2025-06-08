@@ -65,46 +65,63 @@ class FaceLandmarkDataset(torch.utils.data.Dataset):
             img = Image.new('RGB', (640, 640), color='white')
             w, h = 640, 640
         
-        # Process boxes - ensure correct format
+        # Process boxes
         boxes = torch.tensor(ann['boxes'], dtype=torch.float32)
         
+        # ตรวจสอบ format ของ boxes
         if boxes.numel() > 0:
-            # Assume input is xyxy in pixel coordinates
-            if boxes.shape[1] == 4:
-                # Normalize to [0, 1]
-                boxes[:, [0, 2]] = boxes[:, [0, 2]].clamp(0, w) / w
-                boxes[:, [1, 3]] = boxes[:, [1, 3]].clamp(0, h) / h
-                
-                # Convert xyxy to cxcywh
-                x1, y1, x2, y2 = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
-                cx = (x1 + x2) / 2
-                cy = (y1 + y2) / 2
-                width = (x2 - x1).clamp(min=0)
-                height = (y2 - y1).clamp(min=0)
-                
-                boxes = torch.stack([cx, cy, width, height], dim=1)
+            # ถ้าเป็น pixel coordinates (ค่า > 1)
+            if boxes.max() > 1.0:
+                # ตรวจสอบว่าเป็น xyxy หรือ xywh
+                if len(boxes.shape) == 2 and boxes.shape[1] == 4:
+                    # สมมติว่าเป็น xyxy format
+                    x1, y1, x2, y2 = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
+                    
+                    # ตรวจสอบว่าเป็น xyxy จริงไหม (x2 > x1 และ y2 > y1)
+                    if (x2 > x1).all() and (y2 > y1).all():
+                        # เป็น xyxy - normalize แล้วเก็บเป็น xyxy
+                        boxes[:, [0, 2]] = boxes[:, [0, 2]] / w
+                        boxes[:, [1, 3]] = boxes[:, [1, 3]] / h
+                    else:
+                        # อาจเป็น xywh - แปลงเป็น xyxy ก่อน normalize
+                        x, y, bw, bh = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
+                        boxes = torch.stack([x, y, x+bw, y+bh], dim=1)
+                        boxes[:, [0, 2]] = boxes[:, [0, 2]] / w
+                        boxes[:, [1, 3]] = boxes[:, [1, 3]] / h
+            else:
+                # ถ้าเป็น normalized แล้ว - ตรวจสอบว่าเป็น format ไหน
+                # ถ้าข้อมูลดูเหมือน cxcywh (width, height < 0.5 เป็นส่วนใหญ่)
+                if (boxes[:, 2] < 0.5).all() and (boxes[:, 3] < 0.5).all():
+                    # น่าจะเป็น cxcywh แล้ว - แปลงเป็น xyxy
+                    cx, cy, bw, bh = boxes[:, 0], boxes[:, 1], boxes[:, 2], boxes[:, 3]
+                    x1 = cx - bw/2
+                    y1 = cy - bh/2
+                    x2 = cx + bw/2
+                    y2 = cy + bh/2
+                    boxes = torch.stack([x1, y1, x2, y2], dim=1)
+                # else: ถ้าเป็น xyxy แล้วก็ไม่ต้องทำอะไร
         
         # Process landmarks
         landmarks = torch.tensor(ann['landmarks'], dtype=torch.float32)
         if landmarks.numel() > 0:
-            # Normalize landmarks
             landmarks = landmarks.reshape(-1, self.num_landmarks * 2)
-            landmarks[:, 0::2] = landmarks[:, 0::2] / w
-            landmarks[:, 1::2] = landmarks[:, 1::2] / h
+            if landmarks.max() > 1.0:
+                landmarks[:, 0::2] = landmarks[:, 0::2] / w
+                landmarks[:, 1::2] = landmarks[:, 1::2] / h
         
-        # Create labels (all faces are class 0)
+        # Labels - ใช้ 0 สำหรับ face class (RT-DETR uses 0-indexed)
         labels = torch.zeros(len(boxes), dtype=torch.int64)
         
-        # Calculate area in normalized coordinates
+        # Calculate area from boxes (xyxy format)
         if boxes.numel() > 0:
-            area = boxes[:, 2] * boxes[:, 3]  # width * height in normalized coords
+            area = (boxes[:, 2] - boxes[:, 0]) * (boxes[:, 3] - boxes[:, 1])
         else:
             area = torch.zeros(0, dtype=torch.float32)
         
         target = {
-            'boxes': boxes,
+            'boxes': boxes,  # xyxy normalized format
             'landmarks': landmarks,
-            'labels': labels,
+            'labels': labels,  # 0-indexed
             'image_id': torch.tensor([int(idx)]),
             'orig_size': torch.tensor([w, h]),
             'size': torch.tensor([w, h]),
