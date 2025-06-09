@@ -1,0 +1,50 @@
+# configs/rtdetr/include/optimizer_face_improved.yml
+
+use_ema: True 
+ema:
+  type: ModelEMA
+  decay: 0.9999
+  warmups: 2000
+
+find_unused_parameters: True 
+
+epoches: 150
+clip_max_norm: 0.1
+
+# ใช้ AdamW optimizer ที่ดีกว่า
+optimizer:
+  type: AdamW
+  params: 
+    # Backbone - lower learning rate
+    - 
+      params: 'backbone'
+      lr: 0.00001
+      weight_decay: 0.0001
+    # Encoder/Decoder normalization and bias - no weight decay
+    - 
+      params: '^(?=.*encoder(?=.*bias|.*norm.*weight)).*$'
+      weight_decay: 0.
+    -
+      params: '^(?=.*decoder(?=.*bias|.*norm.*weight)).*$'
+      weight_decay: 0.
+    # Landmark heads - higher learning rate
+    -
+      params: 'landmark'
+      lr: 0.0005
+      weight_decay: 0.0001
+
+  lr: 0.0002  # เพิ่ม base learning rate
+  betas: [0.9, 0.999]
+  weight_decay: 0.0001
+
+# Learning rate schedule with warmup
+lr_scheduler:
+  type: MultiStepLR
+  milestones: [80, 120]  # ปรับ milestones
+  gamma: 0.1
+
+# Alternative: Cosine Annealing
+# lr_scheduler:
+#   type: CosineAnnealingLR
+#   T_max: 150
+#   eta_min: 0.000001
