@@ -1,22 +1,24 @@
-# configs/rtdetr/rtdetr_r50vd_face_landmark_improved.yml
 __include__: [
   '../dataset/face_landmark_detection.yml',
   '../runtime.yml',
   './include/dataloader_face.yml',
-  './include/optimizer_face_improved.yml',  # ใช้ optimizer ที่ดีกว่า
+  './include/optimizer_face_improved.yml',
   './include/rtdetr_face_landmark.yml',
 ]
 
 output_dir: ./output/rtdetr_r50vd_face_landmark_v2
 
-# Training settings
-epoches: 150  # เพิ่มจาก 100
+# Override some settings for face detection
+epoches: 150
 checkpoint_step: 5
 log_step: 50
 
-# Face detection specific
-num_classes: 1
-num_landmarks: 5
+# Specific settings for face detection
+num_classes: 1  # Only face class
+num_landmarks: 5  # 5-point landmarks
 
-# Start from pretrained COCO model
+# Enable AMP for faster training
+use_amp: True
+
+# Tuning from COCO pretrained model
 tuning: https://github.com/lyuwenyu/storage/releases/download/v0.1/rtdetr_r50vd_6x_coco_from_paddle.pth
