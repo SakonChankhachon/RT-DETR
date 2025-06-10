@@ -1,3 +1,5 @@
+# configs/rtdetr/include/dataloader_face.yml
+
 train_dataloader: 
   dataset: 
     transforms:
@@ -8,7 +10,8 @@ train_dataloader:
         - {type: ToImageTensor}
         - {type: ConvertDtype}
         - {type: SanitizeBoundingBox, min_size: 1}
-        - {type: ConvertBox, out_fmt: 'cxcywh', normalize: True}  # ← ต้องมีบรรทัดนี้
+        - {type: ConvertBox, out_fmt: 'cxcywh', normalize: True}
+        - {type: SanitizeLandmarks, min_val: 0.0, max_val: 1.0}  # ✅ Add this
   shuffle: True
   batch_size: 16
   num_workers: 4
@@ -21,7 +24,8 @@ val_dataloader:
         - {type: Resize, size: [640, 640]}
         - {type: ToImageTensor}
         - {type: ConvertDtype}
-        - {type: ConvertBox, out_fmt: 'cxcywh', normalize: True}  # ← เพิ่มบรรทัดนี้
+        - {type: ConvertBox, out_fmt: 'cxcywh', normalize: True}
+        - {type: SanitizeLandmarks, min_val: 0.0, max_val: 1.0}  # ✅ Add this
   shuffle: False
   batch_size: 8
   num_workers: 4

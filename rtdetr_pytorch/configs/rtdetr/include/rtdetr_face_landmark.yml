@@ -1,32 +1,30 @@
-# configs/rtdetr/include/rtdetr_face_landmark_fixed.yml
+# Update the rtdetr_face_landmark.yml to include optimized loss weights
+
 task: detection
 
 model: RTDETR
 criterion: PolarLandmarkCriterion
 postprocessor: RTDETRFacePostProcessor
 
-# Model configuration
-RTDETR:
+RTDETR: 
   backbone: PResNet
   encoder: HybridEncoder
   decoder: RTDETRTransformerPolarLandmark
-  multi_scale: [640]  # ✅ ใช้ fixed size แทน multi-scale
+  multi_scale: [640]  # Fixed size for stability
 
-# Backbone configuration  
 PResNet:
   depth: 50
   variant: d
   freeze_at: 0
-  return_idx: [1, 2, 3]      # channels → [512, 1024, 2048]
+  return_idx: [1, 2, 3]
   num_stages: 4
   freeze_norm: True
-  pretrained: True
+  pretrained: True 
 
-# Fixed Encoder configuration
 HybridEncoder:
   in_channels: [512, 1024, 2048]
-  feat_strides: [8, 16, 32]  # ✅ แก้ให้ตรงกับ PResNet output
-  hidden_dim: 256 
+  feat_strides: [8, 16, 32]
+  hidden_dim: 256
   use_encoder_idx: [2]
   num_encoder_layers: 1
   nhead: 8
@@ -37,39 +35,35 @@ HybridEncoder:
   expansion: 1.0
   depth_mult: 1
   act: 'silu'
-  eval_spatial_size: [640, 640]  # ✅ Fixed evaluation size
+  eval_spatial_size: [640, 640]
 
-# Decoder configuration with polar landmark
 RTDETRTransformerPolarLandmark:
-  in_channels: [512, 1024, 2048]  # ✅ เพิ่ม in_channels
-  feat_channels: [512, 1024, 2048]   # ✅ output จาก encoder
+  in_channels: [512, 1024, 2048]
+  feat_channels: [512, 1024, 2048]
   feat_strides: [8, 16, 32]
   hidden_dim: 256
   num_levels: 3
   num_queries: 300
   num_decoder_layers: 6
-  num_denoising: 0       # ✅ disable denoising ก่อน
+  num_denoising: 50  # Reduced for stability
   eval_idx: -1
   eval_spatial_size: [640, 640]
   num_classes: 1
   num_landmarks: 5
   num_orientations: 8
   heatmap_size: 64
-  landmark_loss_weight: 5.0
+  landmark_loss_weight: 1.0  # Based on debug results
 
-# Loss configuration
 use_focal_loss: True
 num_landmarks: 5
 num_orientations: 8
 heatmap_size: 64
 
-# Post-processor configuration
 RTDETRFacePostProcessor:
   num_top_queries: 300
   num_classes: 1
   num_landmarks: 5
 
-# Criterion configuration
 PolarLandmarkCriterion:
   num_classes: 1
   num_landmarks: 5
@@ -78,17 +72,18 @@ PolarLandmarkCriterion:
   heatmap_sigma: 2.0
   heatmap_loss_type: 'focal'
   
+  # Optimized loss weights based on debug analysis
   weight_dict: {
     loss_vfl: 1.0,
     loss_bbox: 5.0,
     loss_giou: 2.0,
-    loss_landmarks: 5.0,
-    loss_heatmap: 2.0,
-    loss_orientation: 1.0,
-    loss_radius: 1.0
+    loss_landmarks: 1.0,      # Reduced from 5.0 based on debug
+    loss_heatmap: 0.5,        # Reduced for stability
+    loss_orientation: 0.2,    # Low weight for auxiliary loss
+    loss_radius: 0.2          # Low weight for auxiliary loss
   }
 
-  losses: ['vfl', 'boxes', 'landmarks']  # ✅ ต้องมีบรรทัดนี้
+  losses: ['vfl', 'boxes', 'landmarks']
   alpha: 0.75
   gamma: 2.0
 

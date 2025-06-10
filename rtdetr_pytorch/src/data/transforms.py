@@ -216,6 +216,8 @@ class RandomIoUCrop(nn.Module):
                 break
         return (img, target) if target is not None else img
 
+# src/data/transforms.py - Updated ConvertBox class with clamping
+
 @register
 class ConvertBox(nn.Module):
     def __init__(self, out_fmt='', normalize=False) -> None:
@@ -234,17 +236,31 @@ class ConvertBox(nn.Module):
                 h = y2 - y1
                 boxes = torch.stack([cx, cy, w, h], dim=-1)
             target['boxes'] = boxes
-        if self.normalize and 'boxes' in target:
-            boxes = target['boxes']
-            if isinstance(img, torch.Tensor):
-                h, w = img.shape[-2:]
-            else:
-                w, h = img.size
-            boxes[:, [0, 2]] /= w
-            boxes[:, [1, 3]] /= h
-            target['boxes'] = boxes
+        
+        # Get image dimensions
+        if isinstance(img, torch.Tensor):
+            h, w = img.shape[-2:]
+        else:
+            w, h = img.size
+        
+        if self.normalize:
+            if 'boxes' in target:
+                boxes = target['boxes']
+                boxes[:, [0, 2]] /= w
+                boxes[:, [1, 3]] /= h
+                target['boxes'] = boxes
+            
+            # ✅ Normalize and clamp landmarks
+            if 'landmarks' in target:
+                landmarks = target['landmarks']
+                landmarks[:, 0::2] /= w  # x coordinates
+                landmarks[:, 1::2] /= h  # y coordinates
+                
+                # 🔧 CRITICAL: Clamp landmarks to [0,1] range
+                landmarks = torch.clamp(landmarks, 0.0, 1.0)
+                target['landmarks'] = landmarks
+        
         return (img, target) if target is not None else img
-
 # Define ComposeFaceLandmark after Compose
 @register
 class ComposeFaceLandmark(Compose):
@@ -253,3 +269,65 @@ class ComposeFaceLandmark(Compose):
     """
     def __init__(self, ops):
         super().__init__(ops)
+
+
+# src/data/transforms.py - Add this new transform
+
+@register
+class SanitizeLandmarks(nn.Module):
+    """Clamp landmarks to valid range and remove invalid ones"""
+    
+    def __init__(self, min_val=0.0, max_val=1.0, remove_outliers=True):
+        super().__init__()
+        self.min_val = min_val
+        self.max_val = max_val
+        self.remove_outliers = remove_outliers
+    
+    def forward(self, img, target=None):
+        if target is not None and 'landmarks' in target:
+            landmarks = target['landmarks']
+            
+            if self.remove_outliers:
+                # Remove faces where landmarks are too far outside valid range
+                x_coords = landmarks[:, 0::2]  # x coordinates
+                y_coords = landmarks[:, 1::2]  # y coordinates
+                
+                # Check if landmarks are mostly within reasonable bounds
+                x_in_bounds = ((x_coords >= -0.1) & (x_coords <= 1.1)).float().mean(dim=1)
+                y_in_bounds = ((y_coords >= -0.1) & (y_coords <= 1.1)).float().mean(dim=1)
+                
+                # Keep faces where at least 80% of landmarks are in bounds
+                keep = (x_in_bounds > 0.8) & (y_in_bounds > 0.8)
+                
+                if keep.any():
+                    # Filter all related data
+                    target['landmarks'] = landmarks[keep]
+                    if 'boxes' in target:
+                        target['boxes'] = target['boxes'][keep]
+                    if 'labels' in target:
+                        target['labels'] = target['labels'][keep]
+                    if 'area' in target:
+                        target['area'] = target['area'][keep]
+                    if 'iscrowd' in target:
+                        target['iscrowd'] = target['iscrowd'][keep]
+                else:
+                    # If no valid faces, create empty tensors
+                    target['landmarks'] = torch.zeros(0, landmarks.shape[1])
+                    if 'boxes' in target:
+                        target['boxes'] = torch.zeros(0, 4)
+                    if 'labels' in target:
+                        target['labels'] = torch.zeros(0, dtype=torch.int64)
+                    if 'area' in target:
+                        target['area'] = torch.zeros(0)
+                    if 'iscrowd' in target:
+                        target['iscrowd'] = torch.zeros(0, dtype=torch.int64)
+            
+            # Clamp remaining landmarks to valid range
+            if target['landmarks'].numel() > 0:
+                target['landmarks'] = torch.clamp(
+                    target['landmarks'], 
+                    self.min_val, 
+                    self.max_val
+                )
+        
+        return (img, target) if target is not None else img
