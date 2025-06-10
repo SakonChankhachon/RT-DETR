@@ -1,0 +1,4 @@
+sync_bn: false
+find_unused_parameters: false
+use_amp: false
+use_ema: false

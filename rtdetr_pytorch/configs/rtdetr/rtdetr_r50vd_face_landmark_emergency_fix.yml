@@ -1,0 +1,219 @@
+# configs/rtdetr/rtdetr_r50vd_face_landmark_emergency_fix.yml
+# แก้ไขด่วนปัญหา validation loss สูง
+
+__include__: [
+  '../dataset/face_landmark_detection_fixed.yml',
+  '../runtime.yml',
+  './include/dataloader_emergency_fix.yml',
+  './include/optimizer_emergency.yml',
+  './include/rtdetr_face_landmark_emergency.yml',
+]
+
+output_dir: ./output/rtdetr_r50vd_face_landmark_emergency_fix
+
+epoches: 100
+checkpoint_step: 10
+log_step: 50
+
+num_classes: 1
+num_landmarks: 5
+
+# ปิด AMP ชั่วคราว
+use_amp: False
+
+# ใช้ pretrained
+tuning: https://github.com/lyuwenyu/storage/releases/download/v0.1/rtdetr_r50vd_6x_coco_from_paddle.pth
+
+
+
+# configs/dataset/face_landmark_detection_fixed.yml
+
+task: detection
+
+num_classes: 1
+num_landmarks: 5
+
+train_dataloader: 
+  type: DataLoader
+  dataset: 
+    type: FaceLandmarkDataset
+    img_folder: ./dataset/faces/train/images/
+    ann_file: ./dataset/faces/train/annotations.json
+    num_landmarks: 5
+    return_visibility: False
+    transforms:
+      type: ComposeFaceLandmark
+      ops: ~
+  shuffle: True
+  batch_size: 8
+  num_workers: 4
+  drop_last: True 
+  collate_fn: default_collate_fn
+
+val_dataloader:
+  type: DataLoader
+  dataset: 
+    type: FaceLandmarkDataset
+    img_folder: ./dataset/faces/val/images/
+    ann_file: ./dataset/faces/val/annotations.json
+    num_landmarks: 5
+    return_visibility: False
+    transforms:
+      type: ComposeFaceLandmark
+      ops: ~
+  shuffle: False
+  batch_size: 4
+  num_workers: 4
+  drop_last: False
+  collate_fn: default_collate_fn
+
+---
+
+# configs/rtdetr/include/dataloader_emergency_fix.yml
+
+train_dataloader: 
+  dataset: 
+    transforms:
+      ops:
+        - {type: Resize, size: [640, 640]}
+        - {type: ToImageTensor}
+        - {type: ConvertDtype}
+        - {type: StrictSanitizeBoundingBox, min_size: 0.01, remove_invalid: True}
+        - {type: FixedConvertBox, out_fmt: 'cxcywh', normalize: True}
+        - {type: StrictSanitizeLandmarks, min_val: 0.0, max_val: 1.0, remove_invalid: True}
+  shuffle: True
+  batch_size: 8
+  num_workers: 4
+  collate_fn: default_collate_fn
+
+val_dataloader:
+  dataset: 
+    transforms:
+      ops: 
+        - {type: Resize, size: [640, 640]}
+        - {type: ToImageTensor}
+        - {type: ConvertDtype}
+        - {type: StrictSanitizeBoundingBox, min_size: 0.01, remove_invalid: True}
+        - {type: FixedConvertBox, out_fmt: 'cxcywh', normalize: True}
+        - {type: StrictSanitizeLandmarks, min_val: 0.0, max_val: 1.0, remove_invalid: True}
+  shuffle: False
+  batch_size: 4
+  num_workers: 4
+  collate_fn: default_collate_fn
+
+---
+
+# configs/rtdetr/include/optimizer_emergency.yml
+
+use_ema: False  # ปิด EMA ชั่วคราว
+
+find_unused_parameters: True 
+
+epoches: 100
+clip_max_norm: 1.0
+
+optimizer:
+  type: AdamW
+  lr: 0.00002  # ลดมาก
+  betas: [0.9, 0.999]
+  weight_decay: 0.0001
+
+lr_scheduler:
+  type: MultiStepLR
+  milestones: [60, 80]
+  gamma: 0.1
+
+---
+
+# configs/rtdetr/include/rtdetr_face_landmark_emergency.yml
+
+task: detection
+
+model: RTDETR
+criterion: PolarLandmarkCriterion
+postprocessor: RTDETRFacePostProcessor
+
+RTDETR: 
+  backbone: PResNet
+  encoder: HybridEncoder
+  decoder: RTDETRTransformerPolarLandmark
+  multi_scale: [640]  # Fixed size only
+
+PResNet:
+  depth: 50
+  variant: d
+  freeze_at: 0
+  return_idx: [1, 2, 3]
+  num_stages: 4
+  freeze_norm: True
+  pretrained: True 
+
+HybridEncoder:
+  in_channels: [512, 1024, 2048]
+  feat_strides: [8, 16, 32]
+  hidden_dim: 256
+  use_encoder_idx: [2]
+  num_encoder_layers: 1
+  nhead: 8
+  dim_feedforward: 1024
+  dropout: 0.
+  enc_act: 'gelu'
+  pe_temperature: 10000
+  expansion: 1.0
+  depth_mult: 1
+  act: 'silu'
+  eval_spatial_size: [640, 640]
+
+RTDETRTransformerPolarLandmark:
+  in_channels: [512, 1024, 2048]
+  feat_channels: [512, 1024, 2048]
+  feat_strides: [8, 16, 32]
+  hidden_dim: 256
+  num_levels: 3
+  num_queries: 300
+  num_decoder_layers: 6
+  num_denoising: 0  # ปิด denoising
+  eval_idx: -1
+  eval_spatial_size: [640, 640]
+  num_classes: 1
+  num_landmarks: 5
+  num_orientations: 8
+  heatmap_size: 16  # ลดขนาดมาก
+  landmark_loss_weight: 0.1
+
+use_focal_loss: True
+num_landmarks: 5
+
+RTDETRFacePostProcessor:
+  num_top_queries: 300
+  num_classes: 1
+  num_landmarks: 5
+
+PolarLandmarkCriterion:
+  num_classes: 1
+  num_landmarks: 5
+  num_orientations: 8
+  heatmap_size: 16
+  heatmap_sigma: 1.0
+  heatmap_loss_type: 'mse'
+  
+  # ลด loss weights อย่างรุนแรง
+  weight_dict: {
+    loss_vfl: 1.0,
+    loss_bbox: 5.0,
+    loss_giou: 2.0,
+    loss_landmarks: 0.1,      # ลดจาก 1.0 เป็น 0.1
+    loss_heatmap: 0.05,       # ลดมาก
+    loss_orientation: 0.01,   # ลดมาก
+    loss_radius: 0.01         # ลดมาก
+  }
+
+  losses: ['vfl', 'boxes', 'landmarks']
+  alpha: 0.75
+  gamma: 2.0
+
+  matcher:
+    type: HungarianMatcher
+    weight_dict: { cost_class: 2, cost_bbox: 5, cost_giou: 2 }
+    alpha: 0.25
+    gamma: 2.0

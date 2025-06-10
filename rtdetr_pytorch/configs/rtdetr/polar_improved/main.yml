@@ -1,0 +1,159 @@
+__include__: [
+  '../runtime.yml',
+  './optimizer_improved.yml',
+]
+
+# Task and model setup
+task: detection
+model: RTDETR
+criterion: PolarLandmarkCriterion
+postprocessor: RTDETRFacePostProcessor
+
+# Model architecture
+RTDETR: 
+  backbone: PResNet
+  encoder: HybridEncoder
+  decoder: RTDETRTransformerPolarLandmark
+  multi_scale: [640]  # Fixed size for better stability
+
+PResNet:
+  depth: 50
+  variant: d
+  freeze_at: 0
+  return_idx: [1, 2, 3]
+  num_stages: 4
+  freeze_norm: True
+  pretrained: True 
+
+HybridEncoder:
+  in_channels: [512, 1024, 2048]
+  feat_strides: [8, 16, 32]
+  hidden_dim: 256
+  use_encoder_idx: [2]
+  num_encoder_layers: 1
+  nhead: 8
+  dim_feedforward: 1024
+  dropout: 0.
+  enc_act: 'gelu'
+  pe_temperature: 10000
+  expansion: 1.0
+  depth_mult: 1
+  act: 'silu'
+  eval_spatial_size: [640, 640]
+
+RTDETRTransformerPolarLandmark:
+  in_channels: [512, 1024, 2048]
+  feat_channels: [512, 1024, 2048]
+  feat_strides: [8, 16, 32]
+  hidden_dim: 256
+  num_levels: 3
+  num_queries: 300
+  num_decoder_layers: 6
+  num_denoising: 50  # Reduced for stability
+  eval_idx: -1
+  eval_spatial_size: [640, 640]
+  num_classes: 1
+  num_landmarks: 5
+  num_orientations: 8
+  heatmap_size: 32  # Reduced for better performance
+  landmark_loss_weight: 1.0
+
+# Global settings
+use_focal_loss: True
+num_classes: 1
+num_landmarks: 5
+num_orientations: 8
+heatmap_size: 32
+
+# Post-processing
+RTDETRFacePostProcessor:
+  num_top_queries: 300
+  num_classes: 1
+  num_landmarks: 5
+
+# Loss function with balanced weights
+PolarLandmarkCriterion:
+  num_classes: 1
+  num_landmarks: 5
+  num_orientations: 8
+  heatmap_size: 32
+  heatmap_sigma: 2.0
+  heatmap_loss_type: 'mse'  # More stable than focal
+  
+  # Balanced loss weights
+  weight_dict: {
+    loss_vfl: 1.0,        # Face detection
+    loss_bbox: 5.0,       # Box regression
+    loss_giou: 2.0,       # Box IoU
+    loss_landmarks: 2.0,  # Coordinate loss
+    loss_heatmap: 1.0,    # Heatmap loss
+    loss_orientation: 0.5, # Orientation loss
+    loss_radius: 0.5      # Radius loss
+  }
+
+  losses: ['vfl', 'boxes', 'landmarks']
+  alpha: 0.75
+  gamma: 2.0
+
+  matcher:
+    type: HungarianMatcher
+    weight_dict: { cost_class: 2, cost_bbox: 5, cost_giou: 2 }
+    alpha: 0.25
+    gamma: 2.0
+
+# Dataset configuration
+train_dataloader: 
+  type: DataLoader
+  dataset: 
+    type: FaceLandmarkDataset
+    img_folder: ./dataset/faces/train/images/
+    ann_file: ./dataset/faces/train/annotations.json
+    num_landmarks: 5
+    return_visibility: False
+    transforms:
+      type: Compose
+      ops:
+        - {type: RandomPhotometricDistort, p: 0.3}  # Reduced augmentation
+        - {type: RandomHorizontalFlip, p: 0.5}
+        - {type: Resize, size: [640, 640]}
+        - {type: ToImageTensor}
+        - {type: ConvertDtype}
+        - {type: SanitizeBoundingBox, min_size: 1}
+        - {type: ConvertBox, out_fmt: 'cxcywh', normalize: True}
+        - {type: SanitizeLandmarks, min_val: 0.0, max_val: 1.0}
+  shuffle: True
+  batch_size: 4  # Smaller batch for stability
+  num_workers: 2
+  drop_last: False
+  collate_fn: default_collate_fn
+
+val_dataloader:
+  type: DataLoader
+  dataset: 
+    type: FaceLandmarkDataset
+    img_folder: ./dataset/faces/val/images/
+    ann_file: ./dataset/faces/val/annotations.json
+    num_landmarks: 5
+    return_visibility: False
+    transforms:
+      type: Compose
+      ops:
+        - {type: Resize, size: [640, 640]}
+        - {type: ToImageTensor}
+        - {type: ConvertDtype}
+        - {type: ConvertBox, out_fmt: 'cxcywh', normalize: True}
+        - {type: SanitizeLandmarks, min_val: 0.0, max_val: 1.0}
+  shuffle: False
+  batch_size: 2
+  num_workers: 2
+  drop_last: False
+  collate_fn: default_collate_fn
+
+# Training settings
+output_dir: ./output/rtdetr_polar_improved
+epoches: 50  # Longer training
+checkpoint_step: 5
+log_step: 10
+
+# Tuning from COCO pretrained for better initialization
+tuning: https://github.com/lyuwenyu/storage/releases/download/v0.1/rtdetr_r50vd_6x_coco_from_paddle.pth

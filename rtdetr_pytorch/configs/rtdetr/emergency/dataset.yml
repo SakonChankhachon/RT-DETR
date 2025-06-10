@@ -1,0 +1,57 @@
+task: detection
+num_classes: 1
+num_landmarks: 5
+train_dataloader:
+  type: DataLoader
+  dataset:
+    type: FaceLandmarkDataset
+    img_folder: ./dataset/faces/train/images/
+    ann_file: ./dataset/faces/train/annotations.json
+    num_landmarks: 5
+    transforms:
+      type: ComposeFaceLandmark
+      ops:
+      - type: Resize
+        size:
+        - 640
+        - 640
+      - type: ToImageTensor
+      - type: ConvertDtype
+      - type: ConvertBox
+        out_fmt: cxcywh
+        normalize: true
+      - type: SanitizeLandmarks
+        min_val: 0.0
+        max_val: 1.0
+  shuffle: true
+  batch_size: 4
+  num_workers: 2
+  drop_last: true
+  collate_fn: default_collate_fn
+val_dataloader:
+  type: DataLoader
+  dataset:
+    type: FaceLandmarkDataset
+    img_folder: ./dataset/faces/val/images/
+    ann_file: ./dataset/faces/val/annotations.json
+    num_landmarks: 5
+    transforms:
+      type: ComposeFaceLandmark
+      ops:
+      - type: Resize
+        size:
+        - 640
+        - 640
+      - type: ToImageTensor
+      - type: ConvertDtype
+      - type: ConvertBox
+        out_fmt: cxcywh
+        normalize: true
+      - type: SanitizeLandmarks
+        min_val: 0.0
+        max_val: 1.0
+  shuffle: false
+  batch_size: 4
+  num_workers: 2
+  drop_last: false
+  collate_fn: default_collate_fn

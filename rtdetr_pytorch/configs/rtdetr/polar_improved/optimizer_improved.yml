@@ -1,0 +1,25 @@
+use_ema: True 
+ema:
+  type: ModelEMA
+  decay: 0.9999
+  warmups: 1000  # Reduced warmup
+
+find_unused_parameters: False  # Better for memory
+clip_max_norm: 0.1
+
+# Conservative optimizer settings
+optimizer:
+  type: AdamW
+  lr: 0.00005  # Lower learning rate for stability
+  betas: [0.9, 0.999]
+  weight_decay: 0.0001
+
+# Gradual learning rate decay
+lr_scheduler:
+  type: MultiStepLR
+  milestones: [30, 45]
+  gamma: 0.1
+
+# Runtime settings
+sync_bn: False
+use_amp: False  # Disable for better precision during debugging
